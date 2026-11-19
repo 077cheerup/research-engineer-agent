@@ -1,0 +1,173 @@
+"""Offline real-graph tests with a scripted model; never calls a remote API."""
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
+
+from research_agent.agent import ConfigurationError, ReportFilesystemBackend, build_agent, load_model
+from research_agent.main import AgentRunError, main, run_agent
+
+
+class ScriptedResearchModel(BaseChatModel):
+    """Drive actual tool nodes based on returned ToolMessages, without network."""
+
+    workspace: str
+    mode: str = "normal"
+    bound_names: list[str] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "offline-scripted-research"
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        self.bound_names.extend(t.name if hasattr(t, "name") else t["name"] for t in tools)
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
+        results = [m for m in messages if isinstance(m, ToolMessage)]
+        if self.mode == "read_secret" and not results:
+            message = AIMessage(content="", tool_calls=[{
+                "name": "read_file", "args": {"file_path": "/.env"},
+                "id": "read-1", "type": "tool_call",
+            }])
+        elif self.mode == "read_secret" or self.mode == "no_tools":
+            message = AIMessage(content="已保存报告（虚假声称）。")
+        elif not results or self.mode == "loop":
+            message = AIMessage(content="", tool_calls=[{
+                "name": "analyze_experiment",
+                "args": {"csv_path": "data/sample_experiments.csv", "function_name": "F1"},
+                "id": f"analysis-{len(results)}", "type": "tool_call",
+            }])
+        elif results[-1].name == "analyze_experiment" and self.mode != "no_write":
+            data = json.loads(results[-1].content)
+            table = data["evidence_markdown"]
+            if self.mode == "bad_numbers":
+                table = table.replace("| A | 5 |", "| A | 999 |")
+            message = AIMessage(content="", tool_calls=[{
+                "name": "write_file",
+                "args": {
+                    "file_path": "/reports/result.md",
+                    "content": "# 离线 Fake Model 流程验证\n\n模拟数据，非正式 CEC2013；无显著性检验。\n\n" + table,
+                },
+                "id": "write-1", "type": "tool_call",
+            }])
+        else:
+            message = AIMessage(content=f"模拟数据摘要。报告已保存到 reports/result.md，绝对路径：{self.workspace}/reports/result.md")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "reports").mkdir()
+    sample = Path(__file__).resolve().parents[1] / "data" / "sample_experiments.csv"
+    (tmp_path / "data" / sample.name).write_bytes(sample.read_bytes())
+    return tmp_path
+
+
+def test_real_graph_registers_and_executes_tools_offline(workspace):
+    model = ScriptedResearchModel(workspace=str(workspace))
+    trace = []
+    result = run_agent(root=workspace, output="reports/result.md", model=model, trace=trace.append)
+    assert {"analyze_experiment", "write_file"} <= set(model.bound_names)
+    assert "read_file" in model.bound_names  # Required by 0.7.40, permission denied.
+    assert "edit_file" not in model.bound_names
+    assert "execute" not in model.bound_names
+    assert result["analysis"]["algorithms"]["A"]["n_seeds"] == 5
+    assert Path(result["report_path"]).is_file()
+    assert any("tool_result write_file" in line and "status=success" in line for line in trace)
+    assert any("analysis_evidence" in line for line in trace)
+
+
+@pytest.mark.parametrize("mode,message", [
+    ("no_tools", "未成功调用"), ("no_write", "write_file"),
+    ("bad_numbers", "数值证据"), ("loop", "步数上限"),
+])
+def test_incomplete_runs_never_pass(workspace, mode, message):
+    model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
+    with pytest.raises(AgentRunError, match=message):
+        run_agent(root=workspace, output="reports/result.md", model=model, max_steps=8)
+
+
+def test_write_failure_not_reported_as_success(workspace, monkeypatch):
+    from deepagents.backends.protocol import WriteResult
+
+    monkeypatch.setattr(ReportFilesystemBackend, "write", lambda *args: WriteResult(error="disk denied"))
+    model = ScriptedResearchModel(workspace=str(workspace))
+    with pytest.raises(AgentRunError, match="write_file"):
+        run_agent(root=workspace, output="reports/result.md", model=model)
+    assert not (workspace / "reports" / "result.md").exists()
+
+
+def test_backend_restricts_writes_and_never_overwrites(workspace):
+    backend = ReportFilesystemBackend(workspace)
+    assert backend.virtual_mode is True
+    assert backend.write("/reports/test.md", "first").error is None
+    assert backend.write("/reports/test.md", "second").error
+    assert (workspace / "reports" / "test.md").read_text() == "first"
+    for path in ("/.env", "/data/evil.csv", "/reports/../evil.md", "/reports/test.txt"):
+        assert backend.write(path, "bad").error
+    assert asyncio.run(backend.awrite("/reports/async.md", "async")).error is None
+
+
+def test_backend_rejects_symlinks(workspace):
+    outside = workspace.parent / "outside"
+    outside.mkdir()
+    (workspace / "reports").rmdir()
+    (workspace / "reports").symlink_to(outside, target_is_directory=True)
+    assert ReportFilesystemBackend(workspace).write("/reports/test.md", "bad").error
+    assert not (outside / "test.md").exists()
+
+
+def test_existing_report_fails_before_model(workspace):
+    path = workspace / "reports" / "result.md"
+    path.write_text("original")
+    with pytest.raises(AgentRunError, match="已存在"):
+        run_agent(root=workspace, output="reports/result.md")
+    assert path.read_text() == "original"
+
+
+def test_configuration_missing(workspace, monkeypatch):
+    for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ConfigurationError, match="LLM_BASE_URL, LLM_API_KEY, LLM_MODEL"):
+        load_model(workspace)
+
+
+def test_dotenv_explicit_chatopenai_arguments(workspace, monkeypatch):
+    for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    (workspace / ".env").write_text("LLM_BASE_URL=https://offline.invalid/v1\nLLM_API_KEY=fake-test-key\nLLM_MODEL=fake-model\n")
+    monkeypatch.setenv("LLM_MODEL", "environment-model")
+    model = load_model(workspace)  # Constructor only, no invoke/network.
+    assert model.model_name == "environment-model"
+    assert model.openai_api_base == "https://offline.invalid/v1"
+    assert model.openai_api_key.get_secret_value() == "fake-test-key"
+    assert model.use_responses_api is False
+
+
+def test_cli_failure_has_nonzero_status(monkeypatch, capsys):
+    def fail(**kwargs):
+        raise AgentRunError("没有真实工具调用")
+    monkeypatch.setattr("research_agent.main.run_agent", fail)
+    assert main([]) == 1
+    assert "没有真实工具调用" in capsys.readouterr().err
+
+
+def test_required_read_tool_cannot_read_dotenv(workspace):
+    secret = "fake-private-test-value"
+    (workspace / ".env").write_text(secret)
+    graph = build_agent(workspace, model=ScriptedResearchModel(workspace=str(workspace), mode="read_secret"))
+    state = graph.invoke({"messages": [{"role": "user", "content": "offline permission test"}]})
+    results = [m for m in state["messages"] if isinstance(m, ToolMessage)]
+    assert len(results) == 1
+    assert results[0].status == "error"
+    assert "permission denied" in results[0].content
+    assert secret not in results[0].content
