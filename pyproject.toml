@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Phase 1: a minimal DeepAgents research analysis loop"
 requires-python = ">=3.11"
 dependencies = [
-  "deepagents>=0.4,<0.8",
+  "deepagents==0.7.40",
   "langchain>=1,<2",
   "langchain-openai>=1,<2",
   "python-dotenv>=1,<2",
