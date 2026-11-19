@@ -45,6 +45,11 @@ class ScriptedResearchModel(BaseChatModel):
                 "args": {"csv_path": "data/sample_experiments.csv", "function_name": "F1"},
                 "id": f"analysis-{len(results)}", "type": "tool_call",
             }])
+            if self.mode == "parallel_write":
+                message.tool_calls.append({
+                    "name": "write_file", "args": {"file_path": "/reports/result.md", "content": "模拟数据：尚未分析"},
+                    "id": "premature-write", "type": "tool_call",
+                })
         elif results[-1].name == "analyze_experiment" and self.mode != "no_write":
             data = json.loads(results[-1].content)
             table = data["evidence_markdown"]
@@ -88,7 +93,7 @@ def test_real_graph_registers_and_executes_tools_offline(workspace):
 
 @pytest.mark.parametrize("mode,message", [
     ("no_tools", "未成功调用"), ("no_write", "write_file"),
-    ("bad_numbers", "数值证据"), ("loop", "步数上限"),
+    ("bad_numbers", "数值证据"), ("loop", "步数上限"), ("parallel_write", "write_file"),
 ])
 def test_incomplete_runs_never_pass(workspace, mode, message):
     model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
@@ -132,6 +137,16 @@ def test_existing_report_fails_before_model(workspace):
     with pytest.raises(AgentRunError, match="已存在"):
         run_agent(root=workspace, output="reports/result.md")
     assert path.read_text() == "original"
+
+
+def test_actual_backend_filesystem_failure(workspace):
+    # Same deterministic filesystem setup used by the optional remote script.
+    (workspace / "reports").rmdir()
+    (workspace / "reports").write_text("blocks mkdir")
+    trace = []
+    with pytest.raises(AgentRunError, match="write_file"):
+        run_agent(root=workspace, output="reports/result.md", model=ScriptedResearchModel(workspace=str(workspace)), trace=trace.append)
+    assert any("tool_result write_file" in line and "status=error" in line for line in trace)
 
 
 def test_configuration_missing(workspace, monkeypatch):

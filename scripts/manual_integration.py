@@ -5,15 +5,16 @@ Run explicitly: uv run python scripts/manual_integration.py
 
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import uuid
 
-from research_agent.agent import load_model
+from research_agent.agent import ConfigurationError, load_model
 from research_agent.main import AgentRunError, run_agent
 from research_agent.tools.experiment import make_analyze_experiment, project_root
 
 
-def main() -> None:
+def run_checks() -> None:
     root = project_root()
     model = load_model(root)  # Explicit invocation permits a real paid API call.
     output = f"reports/manual_{uuid.uuid4().hex[:12]}.md"
@@ -52,5 +53,17 @@ def main() -> None:
     print("Remote protocol checks passed. Review the report's prose against the tables manually.")
 
 
+def main() -> int:
+    try:
+        run_checks()
+    except (ConfigurationError, AgentRunError, AssertionError) as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"FAIL: remote integration error ({type(exc).__name__}); no raw API response logged", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

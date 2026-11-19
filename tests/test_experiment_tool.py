@@ -56,3 +56,11 @@ def test_tool_reports_validation_errors(workspace, content, message):
     (workspace / "data" / "bad.csv").write_text(content, encoding="utf-8")
     result = make_analyze_experiment(workspace).invoke({"csv_path": "data/bad.csv", "function_name": "F1"})
     assert message in result
+
+
+def test_tool_reports_fe_grid_error(workspace):
+    path = workspace / "data" / "demo.csv"
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join([lines[0], *lines[2:]]) + "\n")
+    result = make_analyze_experiment(workspace).invoke({"csv_path": "data/demo.csv", "function_name": "F1"})
+    assert "FE grid" in result
