@@ -205,10 +205,15 @@ tool_call analyze_experiment id=...
 tool_result analyze_experiment id=... status=success
 analysis_evidence { ...真实结构化统计... }
 tool_call write_file id=...
+tool_path {"file_path": "/reports/F1_comparison.md"}
 tool_result write_file id=... status=success
 ```
 
 CLI 读取的是真实 AIMessage/ToolMessage，并将 Tool Call 的参数与指定 CSV、函数和目标文件匹配。只有先收到成功分析结果，再调用成功的 `write_file` 才验收；同一批并发发起分析和写文件也不能冒充先分析后写报告。CLI 还检查文件内容等于写入参数、证据表完全包含、模拟数据声明存在、最终回答包含真实相对和绝对路径。仅模型文字声称“已保存”不算成功。
+
+文件工具失败时，`--trace` 还会显示 `tool_error <name>: <具体原因>`；最终验收错误保留最后一次 `write_file` 错误，避免只显示泛化的“报告未保存”。不会输出写入报告的完整 content 参数或原始 API 错误体。
+
+如果看到 `read_file status=error`，这是 Backend 禁止通用读取的结果；创建新报告无需先读取目标。若 `write_file` 提示“虚拟路径”，检查其 `tool_path`：工具参数必须为 `/reports/F1_comparison.md`，不能传 `/Users/.../reports/F1_comparison.md`。主机绝对路径只用于最终回答。System Prompt、用户请求和工具描述都明确区分这两种路径；Backend 继续拒绝非法路径，不自动纠正或放宽限制。
 
 如果服务拒绝 `tools` 或 `tool_calls` 格式，会报告 HTTP 状态和兼容性诊断；连接失败、超时、未实现 `bind_tools` 或一直没有工具调用也会失败。不会改用普通 Python 直接生成报告来伪装 Agent 成功。为了不泄露服务可能回显的密钥，不打印原始 API 错误体。
 
@@ -247,6 +252,7 @@ PY
 | `uv run pytest -q` | **55 passed in 0.56s**，完全离线 |
 | 模拟 CSV 重新生成 | SHA256 字节一致，可重复 |
 | 移除 LLM 配置后的实际 CLI 运行 | 明确列出缺失配置，退出码 1，未调用远程模型 |
+| 文件工具错误诊断修复后 `uv run pytest -q` | **56 passed**；新增真实图中误传主机绝对路径的回归测试 |
 | 远程模型成功/写入失败集成 | **未执行、未验证**；仅提供显式手动脚本 |
 
 本机默认 uv 缓存目录不在可写范围内，因此实际命令使用了 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`；第一次沙箱内安装因 DNS 失败，授权网络访问后同步成功。正常开发环境无需这一缓存覆盖。不把环境限制或缺密钥的远程测试记为通过。

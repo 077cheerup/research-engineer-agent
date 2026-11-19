@@ -60,9 +60,10 @@ class ReportFilesystemBackend(FilesystemBackend):
             return WriteResult(path="/" + destination.relative_to(self.workspace).as_posix())
         except FileExistsError:
             return WriteResult(error="报告已存在，拒绝覆盖；请指定新的 reports/*.md 文件名")
-        except (OSError, ValueError) as exc:
-            # Do not relay arbitrary system/provider details to the model.
-            return WriteResult(error=f"报告写入失败 ({type(exc).__name__})；仅允许新建 reports/*.md")
+        except ValueError as exc:
+            return WriteResult(error=f"报告路径错误：{exc}；write_file.file_path 请使用 /reports/<name>.md 虚拟路径，不要使用主机绝对路径")
+        except OSError as exc:
+            return WriteResult(error=f"报告写入失败 ({type(exc).__name__}, errno={exc.errno})；请检查 reports/ 目录是否可写")
 
 
 def load_model(root: Path) -> ChatOpenAI:
@@ -93,6 +94,12 @@ def build_agent(root: Path | str | None = None, *, model: BaseChatModel | None =
         backend=backend,
         system_prompt=SYSTEM_PROMPT,
         # 0.7.40 requires read_file in this list; the backend denies every read.
-        middleware=[FilesystemMiddleware(backend=backend, tools=["read_file", "write_file"])],
+        middleware=[FilesystemMiddleware(
+            backend=backend, tools=["read_file", "write_file"],
+            custom_tool_descriptions={
+                "read_file": "此项目不提供通用文件读取，本工具总是拒绝。分析 CSV 请用 analyze_experiment；新建报告前无需读取目标文件。",
+                "write_file": "新建 Markdown 报告。file_path 必须是 /reports/<name>.md 虚拟路径，例如 /reports/F1_comparison.md；禁止传主机绝对路径。无需先调用 read_file；目标存在时会拒绝覆盖。content 是完整报告。",
+            },
+        )],
         name="mini-research-engineer",
     )

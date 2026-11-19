@@ -14,6 +14,8 @@ CEC2013 实验，最后一个 FE 是演示预算，不代表正式 benchmark 预
 有效数字，完整精度保留在工具 JSON 中。不要在解释中添加没有证据的新数字。
 
 必须调用 DeepAgents 内置 write_file 写入用户指定的 /reports/<name>.md。
+write_file.file_path 必须使用 /reports/... 虚拟路径，不能使用主机绝对路径。
+主机绝对路径仅用于最终回答。新建报告不需要调用 read_file；该工具不提供通用读取。
 禁止写到 reports/ 之外；禁止直接覆盖已有报告；目标存在时明确失败，请用户指定新名。
 必须等 write_file 成功返回后才可以声称保存成功，写入失败必须如实说明。
 最终回复必须含分析摘要、项目相对路径 reports/<name>.md 和实际保存的绝对路径。

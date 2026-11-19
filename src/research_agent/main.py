@@ -32,10 +32,13 @@ def verify_run(
     calls = {}
     evidence = None
     written_content = None
+    last_write_error = None
     for message in messages:
         if isinstance(message, AIMessage):
             for call in message.tool_calls:
                 calls[call["id"]] = (call, evidence)
+        if isinstance(message, ToolMessage) and message.name == "write_file" and message.status == "error":
+            last_write_error = message.text
         if not isinstance(message, ToolMessage) or message.status != "success":
             continue
         call, preceding_evidence = calls.get(message.tool_call_id, ({}, None))
@@ -59,7 +62,8 @@ def verify_run(
     if evidence is None:
         raise AgentRunError("Agent 未成功调用指定数据的 analyze_experiment；请检查服务的 Tool Calling 支持")
     if written_content is None:
-        raise AgentRunError("未观察到分析成功之后的 write_file 成功调用；报告未验证保存")
+        detail = f"；工具错误：{last_write_error}" if last_write_error else ""
+        raise AgentRunError("未观察到分析成功之后的 write_file 成功调用；报告未验证保存" + detail)
     if not destination.is_file():
         raise AgentRunError("write_file 返回后预期报告文件不存在")
     saved = destination.read_text(encoding="utf-8")
@@ -97,7 +101,9 @@ def run_agent(
         f"分析算法 A 和算法 B 在 CEC2013 {function} 上的模拟实验结果，比较最终性能、稳定性和收敛趋势，"
         f"生成中文 Markdown 报告。CSV 参数：{json.dumps(csv.relative_to(workspace).as_posix())}；"
         f"function_name 参数：{json.dumps(function)}。先分析，拿到结果后再写入 "
-        f"/{destination.relative_to(workspace).as_posix()}。实际主机绝对路径为 {destination}。"
+        f"/{destination.relative_to(workspace).as_posix()}。write_file.file_path 必须精确使用 "
+        f"{json.dumps('/' + destination.relative_to(workspace).as_posix())}，无需先读取目标。"
+        f"实际主机绝对路径为 {destination}，此主机路径仅用于最终回答，禁止作为工具的 file_path 参数。"
         "请在最终回答包含以上相对路径和绝对路径，并给出摘要。"
     )
     seen = set()
@@ -116,8 +122,12 @@ def run_agent(
                     if isinstance(message, AIMessage):
                         for call in message.tool_calls:
                             trace(f"tool_call {call['name']} id={call['id']}")
+                            if call['name'] in {"read_file", "write_file"}:
+                                trace("tool_path " + json.dumps({"file_path": call['args'].get('file_path')}, ensure_ascii=False))
                     elif isinstance(message, ToolMessage):
                         trace(f"tool_result {message.name} id={message.tool_call_id} status={message.status}")
+                        if message.status == "error" and message.name in {"read_file", "write_file"}:
+                            trace(f"tool_error {message.name}: {message.text}")
                         if message.name == "analyze_experiment" and message.status == "success":
                             result = json.loads(message.content)
                             trace("analysis_evidence " + json.dumps(result, ensure_ascii=False, allow_nan=False))

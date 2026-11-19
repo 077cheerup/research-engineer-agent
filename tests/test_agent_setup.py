@@ -58,7 +58,7 @@ class ScriptedResearchModel(BaseChatModel):
             message = AIMessage(content="", tool_calls=[{
                 "name": "write_file",
                 "args": {
-                    "file_path": "/reports/result.md",
+                    "file_path": f"{self.workspace}/reports/result.md" if self.mode == "host_path" else "/reports/result.md",
                     "content": "# 离线 Fake Model 流程验证\n\n模拟数据，非正式 CEC2013；无显著性检验。\n\n" + table,
                 },
                 "id": "write-1", "type": "tool_call",
@@ -109,6 +109,17 @@ def test_write_failure_not_reported_as_success(workspace, monkeypatch):
     with pytest.raises(AgentRunError, match="write_file"):
         run_agent(root=workspace, output="reports/result.md", model=model)
     assert not (workspace / "reports" / "result.md").exists()
+
+
+def test_host_path_failure_is_actionable_in_trace_and_final_error(workspace):
+    trace = []
+    model = ScriptedResearchModel(workspace=str(workspace), mode="host_path")
+    with pytest.raises(AgentRunError, match="虚拟路径") as error:
+        run_agent(root=workspace, output="reports/result.md", model=model, trace=trace.append)
+    assert "工具错误" in str(error.value)
+    assert any(line.startswith("tool_path ") and str(workspace) in line for line in trace)
+    assert any("tool_error write_file:" in line and "主机绝对路径" in line for line in trace)
+    assert not (workspace / "reports/result.md").exists()
 
 
 def test_backend_restricts_writes_and_never_overwrites(workspace):
