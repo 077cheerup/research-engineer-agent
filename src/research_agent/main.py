@@ -21,6 +21,11 @@ class AgentRunError(RuntimeError):
     """The graph ran without satisfying the observable research contract."""
 
 
+def normalize_evidence(text: str) -> str:
+    """Ignore Markdown hard-break spaces and platform line endings only."""
+    return "\n".join(line.rstrip() for line in text.splitlines())
+
+
 def verify_run(
     messages: list, *, root: Path, csv: Path, function: str, destination: Path
 ) -> dict[str, Any]:
@@ -69,8 +74,8 @@ def verify_run(
     saved = destination.read_text(encoding="utf-8")
     if saved != written_content:
         raise AgentRunError("磁盘报告与实际 write_file 调用内容不一致")
-    if evidence["evidence_markdown"] not in saved:
-        raise AgentRunError("报告数值证据与 Python Tool 结果不一致（需原样保留 evidence_markdown）")
+    if normalize_evidence(evidence["evidence_markdown"]) not in normalize_evidence(saved):
+        raise AgentRunError("报告数值证据片段与 Python Tool 结果不匹配（忽略行尾空白后仍有差异；请核对数值、来源与表格内容）")
     if "模拟数据" not in saved:
         raise AgentRunError("报告缺少模拟数据声明")
     final = messages[-1] if messages else None

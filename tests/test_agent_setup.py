@@ -55,6 +55,8 @@ class ScriptedResearchModel(BaseChatModel):
             table = data["evidence_markdown"]
             if self.mode == "bad_numbers":
                 table = table.replace("| A | 5 |", "| A | 999 |")
+            if self.mode == "markdown_breaks":
+                table = table.replace("\n", "  \n")
             message = AIMessage(content="", tool_calls=[{
                 "name": "write_file",
                 "args": {
@@ -77,8 +79,9 @@ def workspace(tmp_path):
     return tmp_path
 
 
-def test_real_graph_registers_and_executes_tools_offline(workspace):
-    model = ScriptedResearchModel(workspace=str(workspace))
+@pytest.mark.parametrize("mode", ["normal", "markdown_breaks"])
+def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
+    model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     trace = []
     result = run_agent(root=workspace, output="reports/result.md", model=model, trace=trace.append)
     assert {"analyze_experiment", "write_file"} <= set(model.bound_names)

@@ -10,7 +10,7 @@ import tempfile
 import uuid
 
 from research_agent.agent import ConfigurationError, load_model
-from research_agent.main import AgentRunError, run_agent
+from research_agent.main import AgentRunError, normalize_evidence, run_agent
 from research_agent.tools.experiment import make_analyze_experiment, project_root
 
 
@@ -24,7 +24,7 @@ def run_checks() -> None:
     })
     assert result["analysis"] == expected, "Remote tool evidence differs from independent recomputation"
     report = Path(result["report_path"])
-    assert expected["evidence_markdown"] in report.read_text(encoding="utf-8")
+    assert normalize_evidence(expected["evidence_markdown"]) in normalize_evidence(report.read_text(encoding="utf-8"))
     print(result["summary"])
     print(f"PASS: real tool calls, numeric evidence, disk file, final paths: {report}")
 
