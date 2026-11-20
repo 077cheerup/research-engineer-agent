@@ -4,6 +4,7 @@ Run explicitly: uv run python scripts/manual_integration.py
 """
 
 from pathlib import Path
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import uuid
 from research_agent.agent import ConfigurationError, load_model
 from research_agent.main import AgentRunError, run_agent, verify_report_evidence
 from research_agent.tools.experiment import make_analyze_experiment, project_root
+from research_agent.skill_backend import SKILL_PATH
 
 
 def run_checks() -> None:
@@ -28,6 +30,9 @@ def run_checks() -> None:
     assert "task_target experiment-analyst" in success_events
     assert any("tool_result task" in e and "status=success" in e for e in success_events)
     assert any(e.startswith("subagent_analysis_verified ") for e in success_events)
+    assert any(e.startswith("skill_load_verified ") for e in success_events)
+    expected_skill_hash = hashlib.sha256((root / SKILL_PATH.lstrip("/")).read_bytes()).hexdigest()
+    assert any(expected_skill_hash in e for e in success_events if e.startswith("skill_load_verified "))
     assert not any(e.startswith("tool_call analyze_experiment ") for e in success_events), "Main must not call the analysis tool directly"
     expected = make_analyze_experiment(root).invoke({
         "csv_path": "data/sample_experiments.csv", "function_name": "F1",
@@ -36,7 +41,7 @@ def run_checks() -> None:
     report = Path(result["report_path"])
     verify_report_evidence(report.read_text(encoding="utf-8"), expected)
     print(result["summary"])
-    print(f"PASS: real task delegation, verified child tool execution, numeric evidence, disk file, final paths: {report}")
+    print(f"PASS: real task delegation, verified Skill load and child tool execution, numeric evidence, disk file, final paths: {report}")
 
     # An ordinary file named reports prevents any report from being written.
     # This exercises the real built-in write_file failure path, without chmod
@@ -45,6 +50,7 @@ def run_checks() -> None:
         failure_root = Path(directory)
         (failure_root / "data").mkdir()
         shutil.copyfile(root / "data/sample_experiments.csv", failure_root / "data/sample_experiments.csv")
+        shutil.copytree(root / "skills", failure_root / "skills")
         (failure_root / "reports").write_text("intentionally blocks directory creation", encoding="utf-8")
         events = []
 
@@ -60,7 +66,7 @@ def run_checks() -> None:
             print("PASS: real write_file failure rejected by acceptance checks; no success result returned")
         else:
             raise AssertionError("Write failure incorrectly accepted")
-    print("Remote protocol checks passed. Review the report's prose against the tables manually.")
+    print("Remote protocol checks passed. Manually review: simulated-data disclosure; no significance claims; no single-FE speed inference; no invented statistics.")
 
 
 def main() -> int:

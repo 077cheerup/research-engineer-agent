@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,9 @@ class ScriptedResearchModel(BaseChatModel):
     main_history: list[Any] = Field(default_factory=list)
     child_history: list[Any] = Field(default_factory=list)
     child_final: dict[str, Any] = Field(default_factory=dict)
+    child_requests: list[list[Any]] = Field(default_factory=list)
+    analysis_request: str = ""
+    skill_read_target: str | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -35,7 +40,7 @@ class ScriptedResearchModel(BaseChatModel):
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         names = [t.name if hasattr(t, "name") else t["name"] for t in tools]
-        if names == ["analyze_experiment"]:
+        if "analyze_experiment" in names:
             self.child_bound_names.extend(names)
         else:
             self.bound_names.extend(names)
@@ -48,10 +53,21 @@ class ScriptedResearchModel(BaseChatModel):
 
     def child_reply(self, messages):
         self.child_history = list(messages)
+        self.child_requests.append(list(messages))
         results = [m for m in messages if isinstance(m, ToolMessage)]
         if self.mode == "child_no_tool":
             return AIMessage(content='{"source_sha256":"claimed reference","significance_tested":false}')
-        if not results or self.mode == "child_loop":
+        # Discover the loader path from the real middleware-injected catalog,
+        # rather than from a hard-coded system prompt or test response.
+        if not results and self.mode not in {"skip_skill", "claim_skill"}:
+            path = re.search(r"/skills/experiment-analysis/SKILL\.md", messages[0].text)
+            assert path, "SkillsMiddleware did not disclose the skill's loading path"
+            return self.call("read_file", {
+                "file_path": self.skill_read_target or ("/.env" if self.mode == "forbidden_skill_read" else path.group()),
+                "limit": 1 if self.mode == "partial_skill" else 1000,
+            }, "skill-read")
+        analysis_results = [m for m in results if m.name == "analyze_experiment"]
+        if not analysis_results or self.mode == "child_loop":
             csv = "data/other.csv" if self.mode == "child_wrong_csv" else "data/sample_experiments.csv"
             function = "F2" if self.mode == "child_wrong_function" else "F1"
             if self.mode == "child_wrong_function":
@@ -62,22 +78,35 @@ class ScriptedResearchModel(BaseChatModel):
         successful = [m for m in results if m.name == "analyze_experiment" and m.status == "success"]
         if not successful:
             return AIMessage(content="分析失败")
-        if self.mode == "child_write" and len(results) == 1:
+        if self.mode == "child_write" and not any(m.name == "write_file" for m in results):
             return self.call("write_file", {"file_path": "/reports/child.md", "content": "forbidden"}, "child-write")
         if self.mode == "child_summary":
             return AIMessage(content="算法 B 更好。未做显著性检验。")
         data = json.loads(successful[-1].content)
         reply = {
             "source_sha256": data["source"]["sha256"],
-            "conclusions": {"final_performance": "B 最终均值较低。", "stability": "B 的样本标准差较低。", "convergence": "B 在各采样点均值较低，不代表差距持续扩大。"},
+            "conclusions": {
+                "final_performance": "本次模拟数据中 B 的最终均值和中位数较低；未进行显著性检验。",
+                "stability": "本次样本中 B 的最终结果离散程度较低，不能断言统计显著差异。",
+                "convergence": "在该 FE 采样点 B 的均值较低；不能据单点水平判断下降速度。",
+            },
             "significance_tested": False,
         }
+        loaded = next((m for m in results if m.name == "read_file" and m.status == "success" and "## 常见错误与推荐表述" in m.text), None)
+        if loaded is not None:
+            # A scripted stand-in for policy application, using recommendations
+            # from the actual read ToolMessage, not from a hidden prompt copy.
+            rows = [line[line.index("|"):].split("|")[2].strip() for line in loaded.text.splitlines() if line.count("|") == 3]
+            for key, recommendation in zip(("final_performance", "stability", "convergence"), rows[2:5], strict=True):
+                reply["conclusions"][key] = recommendation
         if self.mode == "child_missing_reference":
             del reply["source_sha256"]
         if self.mode == "child_bad_reference":
             reply["source_sha256"] = "0" * 64
         if self.mode == "child_significance":
             reply["significance_tested"] = True
+        if self.mode == "claim_skill":
+            reply["skill_loaded"] = True
         self.child_final = reply
         return AIMessage(content=json.dumps(reply, ensure_ascii=False))
 
@@ -92,7 +121,7 @@ class ScriptedResearchModel(BaseChatModel):
             if self.mode == "direct_analysis":
                 return self.call("analyze_experiment", {"csv_path": "data/sample_experiments.csv", "function_name": "F1"}, "main-analysis")
             target = "general-purpose" if self.mode == "wrong_target" else "experiment-analyst"
-            message = self.call("task", {"subagent_type": target, "description": 'csv_path="data/sample_experiments.csv", function_name="F1"; analyze simulated data'}, f"task-{len(results)}")
+            message = self.call("task", {"subagent_type": target, "description": 'csv_path="data/sample_experiments.csv", function_name="F1"; ' + self.analysis_request}, f"task-{len(results)}")
             if self.mode == "parallel_write":
                 message.tool_calls.append({"name": "write_file", "args": {"file_path": "/reports/result.md", "content": "模拟数据：尚未分析"}, "id": "premature-write", "type": "tool_call"})
             return message
@@ -116,7 +145,7 @@ class ScriptedResearchModel(BaseChatModel):
         return AIMessage(content=f"模拟数据摘要。报告已保存到 reports/result.md，绝对路径：{self.workspace}/reports/result.md")
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
-        message = self.child_reply(messages) if kwargs.get("offline_tools") == ["analyze_experiment"] else self.main_reply(messages)
+        message = self.child_reply(messages) if "analyze_experiment" in kwargs.get("offline_tools", []) else self.main_reply(messages)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
@@ -128,6 +157,7 @@ def workspace(tmp_path):
     (tmp_path / "data" / sample.name).write_bytes(sample.read_bytes())
     (tmp_path / "data/other.csv").write_bytes(sample.read_bytes())
     (tmp_path / "data/F2.csv").write_bytes(sample.read_bytes().replace(b",F1,", b",F2,"))
+    shutil.copytree(sample.parents[1] / "skills", tmp_path / "skills")
     return tmp_path
 
 
@@ -138,7 +168,7 @@ def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
     result = run_agent(root=workspace, output="reports/result.md", model=model, trace=trace.append)
     assert {"task", "write_file"} <= set(model.bound_names)
     assert "analyze_experiment" not in model.bound_names
-    assert set(model.child_bound_names) == {"analyze_experiment"}
+    assert set(model.child_bound_names) == {"analyze_experiment", "read_file"}
     assert all("experiment-analyst" in d and "general-purpose" not in d for d in model.task_descriptions)
     assert not any(isinstance(m, ToolMessage) and m.name == "analyze_experiment" for m in model.main_history)
     assert "read_file" in model.bound_names  # Required by 0.7.40, permission denied.
@@ -158,7 +188,7 @@ def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
 def test_incomplete_runs_never_pass(workspace, mode, message):
     model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     with pytest.raises(AgentRunError, match=message):
-        run_agent(root=workspace, output="reports/result.md", model=model, max_steps=8)
+        run_agent(root=workspace, output="reports/result.md", model=model, max_steps=16)
 
 
 def test_write_failure_not_reported_as_success(workspace, monkeypatch):
@@ -274,10 +304,10 @@ def test_subagent_failures_never_produce_report(workspace, mode, message):
     parent = ScriptedResearchModel(workspace=str(workspace))
     child = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     with pytest.raises(AgentRunError, match=message):
-        run_agent(root=workspace, output="reports/result.md", model=parent, analyst_model=child, max_steps=8)
+        run_agent(root=workspace, output="reports/result.md", model=parent, analyst_model=child, max_steps=16)
     assert not (workspace / "reports/result.md").exists()
     assert "analyze_experiment" not in parent.bound_names
-    assert set(child.child_bound_names) == {"analyze_experiment"}
+    assert set(child.child_bound_names) == {"analyze_experiment", "read_file"}
 
 
 @pytest.mark.parametrize("mode", ["direct_analysis", "wrong_target"])

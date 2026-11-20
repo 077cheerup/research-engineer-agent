@@ -1,8 +1,8 @@
-# Mini Research Engineer Agent — Phase 2.1
+# Mini Research Engineer Agent — Phase 2.2
 
-基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 调用确定性分析 Tool；经过程序验证后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
+基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 通过 `SkillsMiddleware` 发现专业规范、按需读取白名单 Skill，再调用确定性分析 Tool；验证真实 Skill 加载和工具执行后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
 
-本项目是 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.1，在 Phase 1 上增量集成一个分析子 Agent，统计公式和 CSV 格式不变。这里研究的内容只有算法 A/B 在 F1 上的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
+本项目是 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.2。在 `1af7f5c` 的 Phase 2.1 架构上继续增量开发，保留当前 HEAD 的可信证据直接传输与分章节核验修复；不回退代码，统计公式和 CSV 格式不变。这里研究的内容只有算法 A/B 在 F1 上的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
 
 ## 安装、配置与运行
 
@@ -12,7 +12,7 @@
 uv sync
 cp .env.example .env
 # 编辑 .env，填入自己服务的三个配置
-uv run python -m research_agent.main
+uv run python -m research_agent.main --output reports/F1_phase22.md --trace
 ```
 
 `.env` 使用固定变量名：
@@ -91,10 +91,12 @@ uv run python scripts/generate_sample.py
 用户 -> Main（create_deep_agent）
           -> task(subagent_type="experiment-analyst", description="CSV + Function")
              -> 隔离的 Analysis Subagent（create_agent）
+                -> SkillsMiddleware 发现名称/描述/路径
+                -> read_file：只读 experiment-analysis/SKILL.md
                 -> analyze_experiment -> 原有确定性统计
                 -> JSON 来源引用 + 中文结论
              -> 程序核对真实工具记录、证据及参数
-             -> task ToolMessage：完整可信 analysis + conclusions
+             -> task ToolMessage：完整可信 analysis + conclusions + skill 加载凭据
           -> 内置 write_file -> ReportFilesystemBackend -> reports/*.md
 CLI -> 两层验证 -> 摘要和真实路径
 ```
@@ -102,9 +104,9 @@ CLI -> 两层验证 -> 摘要和真实路径
 | 权限 | Main Agent | experiment-analyst |
 | --- | --- | --- |
 | `task` | 仅可委派 experiment-analyst | 无 |
-| `analyze_experiment` | **不注册** | 唯一可用 Tool，只读 data/ CSV |
+| `analyze_experiment` | **不注册** | 保留，只读 data/ CSV |
 | `write_file` | 内置 Tool，仅新建 reports/*.md | **不注册** |
-| `read_file` | 框架要求注册，但 Backend 一律拒绝 | 不注册 |
+| `read_file` | 框架要求注册，但 Backend 一律拒绝 | **新增**，只读指定 Skill 的虚拟路径 |
 | 其他文件工具 / execute | 不注册 | 不注册 |
 
 `Tool` 负责确定性计算；两角色的 `LLM` 分别负责编排与解释；官方 `SubAgentMiddleware` 处理委派与上下文隔离，`FilesystemMiddleware` 提供 Main 的内置写工具；原有 Backend 维持路径限制和禁止覆盖；CLI 验收实际执行证据和文件。
@@ -130,14 +132,57 @@ agent = create_deep_agent(
 
 检查安装源码后采用的 **0.7.40 兼容方式**：
 
-- 普通声明式 `SubAgent` 会获得文件中间件，因此使用官方 `CompiledSubAgent`，包装仅注册分析 Tool 的 `create_agent()` 子图。子图没有 Backend、文件工具或 `task`，不能绕过 Main 写报告；没有 fork Main 的历史。
+- 普通声明式 `SubAgent` 会获得文件中间件，因此使用官方 `CompiledSubAgent`，包装独立的 `create_agent()` 子图。Phase 2.2 子图只增加 Skill 专用只读 Backend 与 `read_file`，不继承 Main 的报告 Backend 或其他文件工具，不能绕过 Main 写报告；没有 fork Main 的历史。
 - 工厂默认添加 `general-purpose`。通过官方的同名 Middleware 替换机制，用只含 `experiment-analyst` 的 `SubAgentMiddleware` 替换默认实例。工厂临时构造的默认栈不会进入最终 Main 的工具集合；最终仅一个 `task`，仅一个可用子 Agent。测试同时检查工具描述和实际拒绝 general-purpose 调用。无需修改第三方源码或进程级全局 Profile 注册。
 - 内置 `task` 支持 CompiledSubAgent 的 `structured_response`：返回对象被序列化为一个 task ToolMessage，而非复制子 Agent 全部消息。当前源码还通过 `config.metadata.lc_subagent_tool_call_id` 传递真实父调用 ID，记录器据此绑定证据。
 - `FilesystemBackend.write()` 默认覆盖文件，因此继续使用原来的 `open('x')` 排他新建。`FilesystemMiddleware` 要求保留 `read_file`，Backend 仍拒绝所有通用读取。写入安全策略没有放宽。
 
-未新增 Skills、Memory、Planning、HITL、MCP 或自定义 Summarization。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
+本阶段只增加一个专业 Skill；未新增子 Agent、Memory、Planning、HITL、MCP 或自定义 Summarization。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
 
 接口参考：[create_deep_agent](https://reference.langchain.com/python/deepagents/graph/create_deep_agent)、[SubAgentMiddleware](https://reference.langchain.com/python/deepagents/middleware/subagents/SubAgentMiddleware)。具体行为以 `uv.lock` 和安装源码为准。
+
+## experiment-analysis Skill 与渐进加载
+
+```text
+skills/
+└── experiment-analysis/
+    └── SKILL.md
+```
+
+`SKILL.md` 有有效的 YAML `name`、`description`，正文涵盖适用任务、步骤、Mean/Median/Std 解释、平均收敛趋势、显著性边界、模拟数据声明及错误/推荐表述。它不计算统计，不运行 Benchmark。专业规范只在 Skill 文件中维护，未整篇复制到 System Prompt；Prompt 仅规定角色、工具调用和输出协议。
+
+配置位于 `subagent.py:make_analyst()`，只用于 Analysis Subagent：
+
+```python
+skill_backend = SkillReadBackend(root)
+child = create_agent(
+    model=model,
+    tools=[make_analyze_experiment(root, on_success=record)],
+    system_prompt=ANALYST_PROMPT,
+    middleware=[
+        FilesystemMiddleware(backend=skill_backend, tools=["read_file"]),
+        SkillsMiddleware(backend=skill_backend, sources=["/skills/"]),
+    ],
+    name="experiment-analyst",
+)
+```
+
+已检查锁定版本 **DeepAgents 0.7.40 / LangChain 1.5.2 / langchain-core 1.8.3 / langchain-openai 1.8.3** 的安装源码：
+
+1. **发现**：`SkillsMiddleware.before_agent()` 用 Backend 的 `ls()` 与 `download_files()` 读取并解析 frontmatter，然后把名称、描述、加载路径加入系统消息。虽然发现过程在程序内部读取文件字节，模型此时只看到元信息，**没有 Skill 正文**。
+2. **加载**：模型调用内置 `read_file(file_path="/skills/experiment-analysis/SKILL.md", limit=1000)`，实际成功的 ToolMessage 才把正文送入子模型上下文。不是创建 Agent 时拼接文件，也没有 pinned Skill 预加载。
+3. **应用**：子模型基于加载的规范解释统计结果；Main 使用结论和可信数值证据写报告。Skill 不计算数字。
+
+`SkillReadBackend` 是最小 `BackendProtocol` 实现：只枚举上述目录，只能下载或读取这一个虚拟路径；路径穿越、主机绝对路径、符号链接、`.env`、CSV、报告和其他 Skill 都被拒绝。写入一律拒绝，其他文件工具根本不注册。原有 Main Backend 与 CSV 安全解析未放宽。
+
+`make_analyst()` 检查中间件真实发现的名称和路径，并同时要求：
+
+- 对应 `read_file` 的真实 AI Tool Call 与成功 ToolMessage；
+- Backend 的全文读取凭据（记录路径和文件 SHA256）。发现用的 `download_files()` 或只读一行不会生成全文凭据。
+
+子模型声称 `skill_loaded=true` 不产生凭据。未加载、无效或缺失 Skill 会在发布可信 task 结果前失败。加载凭据与原有统计记录一样绑定到本次真实 task ID；不使用全局可变记录。
+
+本版本的 Skills 元数据在普通 `invoke()` 输出中被隐藏，因此 wrapper 用官方 `stream_mode="values"` 观察内部发现状态；只将验证后的结构化 task 结果返回 Main，不传播子图内部消息或 Skill 全文。
 
 ## 子 Agent 输出与两层验证
 
@@ -165,7 +210,8 @@ agent = create_deep_agent(
 {
   analysis: {完整 analyze_experiment 结果，Schema 见下文},
   conclusions: {final_performance: string, stability: string, convergence: string},
-  significance_tested: false
+  significance_tested: false,
+  skill: {name: "experiment-analysis", path: "/skills/experiment-analysis/SKILL.md", sha256: string}
 }
 ```
 
@@ -185,6 +231,7 @@ Main 与每次子图运行分别限步；第一次分析验证失败会终止本
 - `tools/experiment.py:make_analyze_experiment(root)`：以闭包绑定工作区，避免依赖 cwd。
 - `agent.py:load_model()` / `build_agent()`：加载配置、创建模型、Backend 和真实 Agent。
 - `subagent.py:make_analyst()` / `verify_analysis()` / `RunEvidence`：隔离分析子图、核对输出、保存运行级可信证据。
+- `skill_backend.py:SkillReadBackend`：Skill 发现/加载的单文件白名单和全文读取凭据。
 - `main.py:run_agent()` / `verify_run()`：执行图并验收委派、写入及真实文件。
 
 Tool 输入为 JSON 对象，两个字段都必填：
@@ -253,6 +300,7 @@ tool_call task id=...
 task_target experiment-analyst
 tool_result task id=... status=success
 subagent_analysis_verified subagent=experiment-analyst task_id=...
+skill_load_verified {"name": "experiment-analysis", "path": "/skills/experiment-analysis/SKILL.md", "sha256": "..."}
 analysis_evidence { ...来自子图真实工具执行记录的统计... }
 tool_call write_file id=...
 tool_path {"file_path": "/reports/F1_comparison.md"}
@@ -277,10 +325,10 @@ uv run python scripts/manual_integration.py
 
 这不是 pytest 项目，也不会自动运行。脚本进行两次真实 Agent 运行：
 
-1. 正常案例：Main 实际调用 task 委派 experiment-analyst；子模型调用分析 Tool，并返回通过运行记录核验的完整结果；Main 调用内置 write_file 保存唯一新报告。检查 task 目标、可信记录、独立重算结果、报告数值和真实路径。Main 不直接调用分析 Tool。
-2. 写入失败案例：在临时工作区用名为 `reports` 的普通文件阻止创建报告目录。要求观察到真实 `write_file` 错误 ToolMessage、无报告文件、验收函数拒绝返回成功。这个案例也调用真实模型，不使用 Fake Model。
+1. 正常案例：Main 实际调用 task 委派 experiment-analyst；子模型真实读取白名单 Skill、调用分析 Tool，并返回通过运行记录核验的完整结果；Main 调用内置 write_file 保存唯一新报告。检查 task 目标、真实全文读取凭据及 Skill SHA256、分析记录、独立重算结果、报告数值和真实路径。Main 不直接调用分析 Tool。
+2. 写入失败案例：临时工作区包含同一 Skill 和样例 CSV，用名为 `reports` 的普通文件阻止创建报告目录。要求观察到真实 `write_file` 错误 ToolMessage、无报告文件、验收函数拒绝返回成功。这个案例也调用真实模型，不使用 Fake Model。
 
-任一条件未满足则脚本失败；缺少 API 配置也不会记为通过。脚本成功之后，**人工审阅报告文字**是否基于数值解释最终性能、标准差和曲线，是否错误声称统计显著性。程序验证数值核心，不能证明每一句自由文本语义都正确。只读独立复算：
+任一条件未满足则脚本失败；缺少 API 配置也不会记为通过。脚本成功之后，**人工审阅报告文字**是否基于数值解释最终性能、标准差和曲线，是否错误声称均值或稳定性差异显著、是否从单点均值推断速度，以及是否编造派生数字。程序验证真实加载与数值核心，不能证明每一句自由文本语义都正确。只读独立复算：
 
 ```bash
 uv run python - <<'PY'
@@ -297,25 +345,24 @@ PY
 
 | 验证 | 实际结果 |
 | --- | --- |
-| Phase 2.1 修改前基线 | **57 passed**，含先前的路径诊断和 Markdown 行尾空白修复 |
-| Phase 2.1 全套离线测试 | **71 passed**；原 57 项回归保留/适配委派角色，新增 14 个参数化测试用例 |
-| 分章节证据核验修复后 | **75 passed in 0.87s**；新增分章节合法报告及三个证据块缺失的回归测试 |
-| 统计公式和 CSV 数据 | `analysis.py` 与 sample CSV 无改动；依赖锁定仍为 DeepAgents 0.7.40 |
-| 新测试覆盖 | 工具隔离、上下文隔离、完整 task JSON、证据丢失/篡改、无工具执行、错误参数、子图越权写入、记录隔离、写入失败及限步 |
-| Phase 1 用户本地真实运行 | 用户提供的 trace 已观察到端到端分析、写入和 CLI 验收成功；不等于解释语义完全正确 |
-| 子模型来源引用契约修复后 | **75 passed**；验证模型不抄表时 task 仍含完整原始证据，缺引用/错引用/无工具执行/传输字段丢失仍失败 |
-| 用户 Phase 2.1 远程 trace 和报告 | 真实 task、子工具程序验证和 write_file 成功；原 CLI 因证据分章节误报。现有 F1_phase21_live.md 的三个证据块已独立重算核对通过 |
-| 来源引用修复后真实远程正常链路 | **已实际运行并通过技术验收**：真实 task、子工具执行验证、完整统计传输、write_file、磁盘内容与最终路径；报告为 reports/F1_phase21_reference_check.md，另已独立重算核对证据 |
-| 真实运行的解释质量 | 最终摘要仍出现无显著性检验依据的“显著低于”；技术验收不代表自然语言结论完全正确，仍需人工审阅 |
-| 修复后远程写入失败案例 | **未执行**；离线 Fake Model 已覆盖，不能视为远程通过 |
+| 本阶段修改前基线 | **75 项离线测试**；已保留 Phase 2.1 后续证据传输和报告核验修复 |
+| Phase 2.2 全部离线测试 | **99 passed**；75 项回归通过，新增 24 个 Skill 测试用例 |
+| Skill frontmatter / 命名校验 | `skill-creator/scripts/quick_validate.py` 返回 `Skill is valid!` |
+| 发现与加载 | 实际 SkillsMiddleware、read_file、白名单 Backend；发现时无正文，加载时有全文及可信凭据 |
+| 权限与失败 | 非白名单拒绝、缺失/无效 Skill、仅读一行、跳过读取、伪造已加载声明均覆盖 |
+| 使用阶段 | Fake Model 从真实读取的 Skill 表格提取推荐表述，覆盖均值显著性、Std 显著性和单点速度误推；保持模拟声明、不新增百分比等统计 |
+| Phase 2.1 真实模型 | 之前正常链路已通过技术验收；不等于本阶段 Skill 的远程效果已验证 |
+| Phase 2.2 真实模型 | **未执行**；本任务按要求只运行离线测试，手动入口保留 |
 
-整个 pytest 套件禁止 HTTP 和 socket。真实 API 测试不被 pytest 收集，也不会因缺密钥而记为通过。本机使用可写缓存：`UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`；正常开发环境可直接用 `uv sync`、`uv run pytest -q`。
+整个 pytest 套件禁止 HTTP 和 socket。Fake Model 测试验证调用协议、信息暴露和证据传递，**不能证明真实模型理解或遵守专业规范**。真实 API 测试不被 pytest 收集，不会因缺密钥记为通过。本机使用可写缓存 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`；普通环境可直接 `uv run pytest -q`。
 
-## Phase 2.1 范围与限制
+## Phase 2.2 范围与限制
 
-仅增加一个负责实验分析的子 Agent，验证委派后的工具权限、数据证据和上下文隔离。不增加统计公式、数据库、前端、容器、MCP、Skills、Memory、Planning、HITL、昂贵实验或自动改算法。
+仅增加一个专业分析 Skill 与受限读取，未增加子 Agent、统计公式、数据库、前端、MCP、Memory、Planning、HITL 或自动实验。当前 CLI 只处理实验分析，因此这一类任务必须实际加载适用 Skill 才验收。
 
-模型须支持普通 tools/tool_calls；子模型须返回含来源 SHA256 和结论的 JSON，完整证据通过真实工具记录直接传输。格式不合约会明确失败，不回退成伪成功。解释仍可能出错，完整证据不等于语义正确。记录器是进程内、单次运行的验证辅助，不是持久审计系统；版本依赖点是 CompiledSubAgent structured_response、task metadata ID 和同名 Middleware 替换，升级需重跑回归。
+专业规范没有复制进 System Prompt，也没有语义判定器。模型仍可能误用“显著”或由水平误推速度，Main 也可能在整理时改写结论；真实模型效果与全文语义仍需手动审阅。记录器是进程内单次运行的验证辅助，不是持久审计系统。
+
+版本依赖点包括 SkillsMiddleware 的 ls/download_files 发现接口、内部 Skill 元数据状态、FilesystemMiddleware 的 read_file，以及原有 task metadata ID、structured_response 和同名 Middleware 替换。依赖未升级；升级时应重跑回归。源码工作区运行仍是支持的使用方式，wheel 不单独打包 skills/data 资源。
 
 ## 文件结构
 
@@ -334,19 +381,22 @@ research-engineer-agent/
 │   ├── prompts.py
 │   ├── analysis.py
 │   ├── subagent.py
+│   ├── skill_backend.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
 ├── scripts/
 │   ├── generate_sample.py
 │   └── manual_integration.py
+├── skills/experiment-analysis/SKILL.md
 ├── data/sample_experiments.csv
 ├── reports/.gitkeep
 └── tests/
     ├── conftest.py
     ├── test_analysis.py
     ├── test_experiment_tool.py
-    └── test_agent_setup.py
+    ├── test_agent_setup.py
+    └── test_skills.py
 ```
 
 GitHub 仓库：[077cheerup/research-engineer-agent](https://github.com/077cheerup/research-engineer-agent)。按完成并验证的阶段提交和推送，密钥与运行报告不上传。

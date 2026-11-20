@@ -153,6 +153,8 @@ def run_agent(
                             trace(f"tool_error {name}: {message.text}")
                         if name == "task" and message.tool_call_id in run_evidence.completed:
                             trace(f"subagent_analysis_verified subagent={ANALYST_NAME} task_id={message.tool_call_id}")
+                            skill = run_evidence.completed[message.tool_call_id]["payload"]["skill"]
+                            trace("skill_load_verified " + json.dumps(skill, ensure_ascii=False))
                             trace("analysis_evidence " + json.dumps(run_evidence.completed[message.tool_call_id]["analysis"], ensure_ascii=False, allow_nan=False))
     except GraphRecursionError as exc:
         raise AgentRunError("达到运行步数上限；可能存在重复 Tool Calling，报告未验收") from exc
@@ -174,7 +176,7 @@ def run_agent(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.1")
+    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.2")
     parser.add_argument("--csv", default="data/sample_experiments.csv")
     parser.add_argument("--function", default="F1")
     parser.add_argument("--output", default="reports/F1_comparison.md")
