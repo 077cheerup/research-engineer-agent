@@ -14,6 +14,7 @@ from research_agent.agent import ConfigurationError, load_model
 from research_agent.main import AgentRunError, run_agent, verify_report_evidence
 from research_agent.tools.experiment import make_analyze_experiment, project_root
 from research_agent.skill_backend import SKILL_PATH
+from research_agent.memory import ResearchMemoryStore
 
 
 def run_checks() -> None:
@@ -40,8 +41,10 @@ def run_checks() -> None:
     assert result["analysis"] == expected, "Remote tool evidence differs from independent recomputation"
     report = Path(result["report_path"])
     verify_report_evidence(report.read_text(encoding="utf-8"), expected)
+    records = ResearchMemoryStore(root).retrieve(function_name="F1", algorithms=["A", "B"], limit=sys.maxsize)
+    assert any(r["experiment_id"] == result["memory"]["experiment_id"] for r in records)
     print(result["summary"])
-    print(f"PASS: real task delegation, verified Skill load and child tool execution, numeric evidence, disk file, final paths: {report}")
+    print(f"PASS: real task delegation, Skill load, statistics, report and persisted Memory: {report}")
 
     # An ordinary file named reports prevents any report from being written.
     # This exercises the real built-in write_file failure path, without chmod
@@ -63,6 +66,7 @@ def run_checks() -> None:
         except AgentRunError:
             assert any("tool_result write_file" in e and "status=error" in e for e in events), "No real write_file failure observed"
             assert not (failure_root / "reports/forced_failure.md").exists()
+            assert not (failure_root / "memory/research.json").exists()
             print("PASS: real write_file failure rejected by acceptance checks; no success result returned")
         else:
             raise AssertionError("Write failure incorrectly accepted")

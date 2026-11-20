@@ -17,6 +17,7 @@ from research_agent.agent import ConfigurationError, build_agent, report_path
 from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
 from research_agent.statistical_language import StatisticalLanguageError, verify_statistical_language
+from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, history_summary
 
 
 class AgentRunError(RuntimeError):
@@ -51,18 +52,19 @@ def verify_run(
     natural-language correctness still requires human review.
     """
     calls = {}
-    evidence = None
+    payload = None
+    report_payload = None
     written_content = None
     last_write_error = None
     for message in messages:
         if isinstance(message, AIMessage):
             for call in message.tool_calls:
-                calls[call["id"]] = (call, evidence)
+                calls[call["id"]] = (call, payload)
         if isinstance(message, ToolMessage) and message.name == "write_file" and message.status == "error":
             last_write_error = message.text
         if not isinstance(message, ToolMessage) or message.status != "success":
             continue
-        call, preceding_evidence = calls.get(message.tool_call_id, ({}, None))
+        call, preceding_payload = calls.get(message.tool_call_id, ({}, None))
         if call.get("name") == "task":
             args = call["args"]
             if args.get("subagent_type") != ANALYST_NAME:
@@ -71,17 +73,17 @@ def verify_run(
                 message.tool_call_id, message.text, run_evidence,
                 csv_path=csv.relative_to(root).as_posix(), function_name=function,
             )
-            evidence = payload["analysis"]
-        if message.name == "write_file" and call.get("name") == message.name and preceding_evidence:
+        if message.name == "write_file" and call.get("name") == message.name and preceding_payload:
             args = call["args"]
             if report_path(args["file_path"], root) == destination:
                 written_content = args["content"]
-                evidence = preceding_evidence
-    if evidence is None:
+                report_payload = preceding_payload
+    if payload is None:
         raise AgentRunError("Main 未成功调用 task 委派 experiment-analyst 并取得可信分析结果")
     if written_content is None:
         detail = f"；工具错误：{last_write_error}" if last_write_error else ""
         raise AgentRunError("未观察到分析成功之后的 write_file 成功调用；报告未验证保存" + detail)
+    evidence = report_payload["analysis"]
     if not destination.is_file():
         raise AgentRunError("write_file 返回后预期报告文件不存在")
     saved = destination.read_text(encoding="utf-8")
@@ -103,7 +105,8 @@ def verify_run(
             )
     except StatisticalLanguageError as exc:
         raise AgentRunError(str(exc)) from exc
-    return {"summary": final.text, "report_path": str(destination), "analysis": evidence}
+    return {"summary": final.text, "report_path": str(destination), "analysis": evidence,
+            "conclusions": report_payload["conclusions"], "skill": report_payload["skill"]}
 
 
 def run_agent(
@@ -111,6 +114,7 @@ def run_agent(
     output: str = "reports/F1_comparison.md", root: Path | str | None = None,
     model: BaseChatModel | None = None, analyst_model: BaseChatModel | None = None, max_steps: int = 24,
     trace: Callable[[str], None] | None = None,
+    memory_limit: int = 3, memory_max_chars: int = 4000,
 ) -> dict[str, Any]:
     """Invoke a bounded real graph; no deterministic substitute for the agent."""
     workspace = Path(root).resolve() if root is not None else project_root()
@@ -120,6 +124,18 @@ def run_agent(
         raise AgentRunError("目标报告已存在，拒绝覆盖；请通过 --output 指定新文件名")
     if max_steps < 1:
         raise ValueError("max_steps 必须为正整数")
+    if memory_max_chars < 0:
+        raise ValueError("memory_max_chars 不能为负")
+    try:
+        memory = ResearchMemoryStore(workspace)
+        # The current CLI task explicitly compares A/B. Retrieval by both
+        # algorithm names keeps unrelated function/algorithm histories out.
+        historical = memory.retrieve(function_name=function, algorithms=["A", "B"], limit=memory_limit)
+        historical_text = history_summary(historical, max_chars=memory_max_chars)
+    except ResearchMemoryError as exc:
+        raise AgentRunError(f"历史 Memory 读取或验证失败：{exc}") from exc
+    if trace:
+        trace(f"memory_retrieved matched={len(historical)} injected_chars={len(historical_text)}")
     run_evidence = RunEvidence(csv_path=csv.relative_to(workspace).as_posix(), function_name=function)
     graph = build_agent(workspace, model=model, analyst_model=analyst_model, evidence=run_evidence, max_steps=max_steps)
     request = (
@@ -135,9 +151,13 @@ def run_agent(
     seen = set()
     call_names = {}
     messages = []
+    inputs = []
+    if historical_text:
+        inputs.append({"role": "user", "content": historical_text})
+    inputs.append({"role": "user", "content": request})
     try:
         for state in graph.stream(
-            {"messages": [{"role": "user", "content": request}]},
+            {"messages": inputs},
             config={"recursion_limit": max_steps}, stream_mode="values",
         ):
             messages = state["messages"]
@@ -179,13 +199,20 @@ def run_agent(
     except AnalysisVerificationError as exc:
         raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
     try:
-        return verify_run(messages, root=workspace, csv=csv, function=function, destination=destination, run_evidence=run_evidence)
+        verified = verify_run(messages, root=workspace, csv=csv, function=function, destination=destination, run_evidence=run_evidence)
     except AnalysisVerificationError as exc:
         raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
+    try:
+        verified["memory"] = memory.save_verified(verified)
+    except ResearchMemoryError as exc:
+        raise AgentRunError(f"报告验收已通过，但 Memory 保存失败：{exc}") from exc
+    if trace:
+        trace("memory_saved " + json.dumps(verified["memory"], ensure_ascii=False))
+    return verified
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.2")
+    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.3")
     parser.add_argument("--csv", default="data/sample_experiments.csv")
     parser.add_argument("--function", default="F1")
     parser.add_argument("--output", default="reports/F1_comparison.md")
@@ -207,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(result["summary"])
     print(f"已核验报告：{result['report_path']}")
+    print(f"已保存研究记忆：{result['memory']['experiment_id']} → {result['memory']['path']}")
     return 0
 
 
