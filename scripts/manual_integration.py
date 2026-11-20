@@ -18,7 +18,17 @@ def run_checks() -> None:
     root = project_root()
     model = load_model(root)  # Explicit invocation permits a real paid API call.
     output = f"reports/manual_{uuid.uuid4().hex[:12]}.md"
-    result = run_agent(root=root, model=model, output=output, trace=print)
+    success_events = []
+
+    def success_trace(event: str) -> None:
+        success_events.append(event)
+        print(event)
+
+    result = run_agent(root=root, model=model, output=output, trace=success_trace)
+    assert "task_target experiment-analyst" in success_events
+    assert any("tool_result task" in e and "status=success" in e for e in success_events)
+    assert any(e.startswith("subagent_analysis_verified ") for e in success_events)
+    assert not any(e.startswith("tool_call analyze_experiment ") for e in success_events), "Main must not call the analysis tool directly"
     expected = make_analyze_experiment(root).invoke({
         "csv_path": "data/sample_experiments.csv", "function_name": "F1",
     })
@@ -26,7 +36,7 @@ def run_checks() -> None:
     report = Path(result["report_path"])
     assert normalize_evidence(expected["evidence_markdown"]) in normalize_evidence(report.read_text(encoding="utf-8"))
     print(result["summary"])
-    print(f"PASS: real tool calls, numeric evidence, disk file, final paths: {report}")
+    print(f"PASS: real task delegation, verified child tool execution, numeric evidence, disk file, final paths: {report}")
 
     # An ordinary file named reports prevents any report from being written.
     # This exercises the real built-in write_file failure path, without chmod

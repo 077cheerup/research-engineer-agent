@@ -1,6 +1,7 @@
 """Project-scoped LangChain tool. No LLM and no report generation."""
 
 from pathlib import Path
+from typing import Callable
 
 from langchain_core.tools import ToolException, tool
 
@@ -27,7 +28,10 @@ def resolve_csv_path(csv_path: str, root: Path) -> Path:
     return candidate
 
 
-def make_analyze_experiment(root: Path | str | None = None):
+def make_analyze_experiment(
+    root: Path | str | None = None,
+    *, on_success: Callable[[str, str, dict], None] | None = None,
+):
     """Bind an explicit workspace root without relying on global cwd/state."""
     workspace = Path(root).resolve() if root is not None else project_root()
 
@@ -49,6 +53,8 @@ def make_analyze_experiment(root: Path | str | None = None):
             result = analyze_csv(path, function_name)
             result["source"]["csv_path"] = path.relative_to(workspace).as_posix()
             result["evidence_markdown"] = evidence_markdown(result)
+            if on_success is not None:
+                on_success(result["source"]["csv_path"], function_name, result)
             return result
         except AnalysisError as exc:
             raise ToolException(str(exc)) from exc

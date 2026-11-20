@@ -15,19 +15,16 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from research_agent.agent import ConfigurationError, build_agent, report_path
 from research_agent.tools.experiment import project_root, resolve_csv_path
+from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
 
 
 class AgentRunError(RuntimeError):
     """The graph ran without satisfying the observable research contract."""
 
 
-def normalize_evidence(text: str) -> str:
-    """Ignore Markdown hard-break spaces and platform line endings only."""
-    return "\n".join(line.rstrip() for line in text.splitlines())
-
-
 def verify_run(
-    messages: list, *, root: Path, csv: Path, function: str, destination: Path
+    messages: list, *, root: Path, csv: Path, function: str, destination: Path,
+    run_evidence: RunEvidence,
 ) -> dict[str, Any]:
     """Require real ToolMessages, correct ordering, evidence, and disk content.
 
@@ -47,25 +44,22 @@ def verify_run(
         if not isinstance(message, ToolMessage) or message.status != "success":
             continue
         call, preceding_evidence = calls.get(message.tool_call_id, ({}, None))
-        if message.name == "analyze_experiment" and call.get("name") == message.name:
+        if call.get("name") == "task":
             args = call["args"]
-            if args.get("function_name") != function:
+            if args.get("subagent_type") != ANALYST_NAME:
                 continue
-            if resolve_csv_path(args["csv_path"], root) != csv:
-                continue
-            try:
-                parsed = json.loads(message.content)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(parsed, dict) and "evidence_markdown" in parsed:
-                evidence = parsed
+            payload = verify_analysis(
+                message.tool_call_id, message.text, run_evidence,
+                csv_path=csv.relative_to(root).as_posix(), function_name=function,
+            )
+            evidence = payload["analysis"]
         if message.name == "write_file" and call.get("name") == message.name and preceding_evidence:
             args = call["args"]
             if report_path(args["file_path"], root) == destination:
                 written_content = args["content"]
                 evidence = preceding_evidence
     if evidence is None:
-        raise AgentRunError("Agent 未成功调用指定数据的 analyze_experiment；请检查服务的 Tool Calling 支持")
+        raise AgentRunError("Main 未成功调用 task 委派 experiment-analyst 并取得可信分析结果")
     if written_content is None:
         detail = f"；工具错误：{last_write_error}" if last_write_error else ""
         raise AgentRunError("未观察到分析成功之后的 write_file 成功调用；报告未验证保存" + detail)
@@ -90,7 +84,7 @@ def verify_run(
 def run_agent(
     *, csv_path: str = "data/sample_experiments.csv", function: str = "F1",
     output: str = "reports/F1_comparison.md", root: Path | str | None = None,
-    model: BaseChatModel | None = None, max_steps: int = 24,
+    model: BaseChatModel | None = None, analyst_model: BaseChatModel | None = None, max_steps: int = 24,
     trace: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Invoke a bounded real graph; no deterministic substitute for the agent."""
@@ -101,17 +95,20 @@ def run_agent(
         raise AgentRunError("目标报告已存在，拒绝覆盖；请通过 --output 指定新文件名")
     if max_steps < 1:
         raise ValueError("max_steps 必须为正整数")
-    graph = build_agent(workspace, model=model)
+    run_evidence = RunEvidence(csv_path=csv.relative_to(workspace).as_posix(), function_name=function)
+    graph = build_agent(workspace, model=model, analyst_model=analyst_model, evidence=run_evidence, max_steps=max_steps)
     request = (
         f"分析算法 A 和算法 B 在 CEC2013 {function} 上的模拟实验结果，比较最终性能、稳定性和收敛趋势，"
         f"生成中文 Markdown 报告。CSV 参数：{json.dumps(csv.relative_to(workspace).as_posix())}；"
-        f"function_name 参数：{json.dumps(function)}。先分析，拿到结果后再写入 "
+        f"function_name 参数：{json.dumps(function)}。先用 task 委派 experiment-analyst，"
+        "description 中须包含以上两个精确参数。取得完整可信分析结果后再写入 "
         f"/{destination.relative_to(workspace).as_posix()}。write_file.file_path 必须精确使用 "
         f"{json.dumps('/' + destination.relative_to(workspace).as_posix())}，无需先读取目标。"
         f"实际主机绝对路径为 {destination}，此主机路径仅用于最终回答，禁止作为工具的 file_path 参数。"
         "请在最终回答包含以上相对路径和绝对路径，并给出摘要。"
     )
     seen = set()
+    call_names = {}
     messages = []
     try:
         for state in graph.stream(
@@ -126,16 +123,20 @@ def run_agent(
                     seen.add(message.id)
                     if isinstance(message, AIMessage):
                         for call in message.tool_calls:
+                            call_names[call['id']] = call['name']
                             trace(f"tool_call {call['name']} id={call['id']}")
+                            if call['name'] == "task":
+                                trace("task_target " + str(call['args'].get('subagent_type')))
                             if call['name'] in {"read_file", "write_file"}:
                                 trace("tool_path " + json.dumps({"file_path": call['args'].get('file_path')}, ensure_ascii=False))
                     elif isinstance(message, ToolMessage):
-                        trace(f"tool_result {message.name} id={message.tool_call_id} status={message.status}")
-                        if message.status == "error" and message.name in {"read_file", "write_file"}:
-                            trace(f"tool_error {message.name}: {message.text}")
-                        if message.name == "analyze_experiment" and message.status == "success":
-                            result = json.loads(message.content)
-                            trace("analysis_evidence " + json.dumps(result, ensure_ascii=False, allow_nan=False))
+                        name = message.name or call_names.get(message.tool_call_id, "unknown")
+                        trace(f"tool_result {name} id={message.tool_call_id} status={message.status}")
+                        if message.status == "error" and name in {"read_file", "write_file"}:
+                            trace(f"tool_error {name}: {message.text}")
+                        if name == "task" and message.tool_call_id in run_evidence.completed:
+                            trace(f"subagent_analysis_verified subagent={ANALYST_NAME} task_id={message.tool_call_id}")
+                            trace("analysis_evidence " + json.dumps(run_evidence.completed[message.tool_call_id]["analysis"], ensure_ascii=False, allow_nan=False))
     except GraphRecursionError as exc:
         raise AgentRunError("达到运行步数上限；可能存在重复 Tool Calling，报告未验收") from exc
     except (APIConnectionError, APITimeoutError) as exc:
@@ -147,11 +148,16 @@ def run_agent(
         ) from exc
     except NotImplementedError as exc:
         raise AgentRunError("模型未实现 Tool Calling/bind_tools；请选择支持工具调用的服务") from exc
-    return verify_run(messages, root=workspace, csv=csv, function=function, destination=destination)
+    except AnalysisVerificationError as exc:
+        raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
+    try:
+        return verify_run(messages, root=workspace, csv=csv, function=function, destination=destination, run_evidence=run_evidence)
+    except AnalysisVerificationError as exc:
+        raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 1")
+    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.1")
     parser.add_argument("--csv", default="data/sample_experiments.csv")
     parser.add_argument("--function", default="F1")
     parser.add_argument("--output", default="reports/F1_comparison.md")

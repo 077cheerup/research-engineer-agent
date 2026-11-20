@@ -10,12 +10,14 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from deepagents.backends.protocol import ReadResult, WriteResult
 from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.middleware.subagents import SubAgentMiddleware
 from dotenv import dotenv_values
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from research_agent.prompts import SYSTEM_PROMPT
-from research_agent.tools.experiment import make_analyze_experiment, project_root
+from research_agent.tools.experiment import project_root
+from research_agent.subagent import RunEvidence, make_analyst
 
 
 class ConfigurationError(ValueError):
@@ -49,7 +51,7 @@ class ReportFilesystemBackend(FilesystemBackend):
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         # The CSV tool owns reads. This also covers dotfiles: the framework's
         # /** permission glob does not match .env in version 0.7.40.
-        return ReadResult(error="permission denied: use analyze_experiment to read data/*.csv")
+        return ReadResult(error="permission denied: delegate CSV analysis to experiment-analyst")
 
     def write(self, file_path: str, content: str) -> WriteResult:
         try:
@@ -84,20 +86,35 @@ def load_model(root: Path) -> ChatOpenAI:
     )
 
 
-def build_agent(root: Path | str | None = None, *, model: BaseChatModel | None = None):
+def build_agent(
+    root: Path | str | None = None, *, model: BaseChatModel | None = None,
+    analyst_model: BaseChatModel | None = None, evidence: RunEvidence | None = None,
+    max_steps: int = 24,
+):
     """Use the real create_deep_agent; injectable models enable offline tests."""
     workspace = Path(root).resolve() if root is not None else project_root()
     backend = ReportFilesystemBackend(workspace)
+    main_model = model if model is not None else load_model(workspace)
+    run_evidence = evidence if evidence is not None else RunEvidence()
+    analyst = make_analyst(
+        workspace, analyst_model if analyst_model is not None else main_model,
+        run_evidence, max_steps=max_steps,
+    )
     return create_deep_agent(
-        model=model if model is not None else load_model(workspace),
-        tools=[make_analyze_experiment(workspace)],
+        model=main_model,
+        tools=[],
         backend=backend,
         system_prompt=SYSTEM_PROMPT,
-        # 0.7.40 requires read_file in this list; the backend denies every read.
-        middleware=[FilesystemMiddleware(
+        # Public same-name replacement removes the default general-purpose
+        # agent from the final task tool without a global profile registration.
+        middleware=[SubAgentMiddleware(
+            backend=backend, subagents=[analyst],
+            task_description="委派实验分析任务。description 中必须包含 csv_path 和 function_name。只可使用以下子 Agent：\n{available_agents}\n返回经过程序核验的完整统计 JSON 和中文结论。",
+        ), FilesystemMiddleware(
+            # 0.7.40 requires read_file; the backend denies every read.
             backend=backend, tools=["read_file", "write_file"],
             custom_tool_descriptions={
-                "read_file": "此项目不提供通用文件读取，本工具总是拒绝。分析 CSV 请用 analyze_experiment；新建报告前无需读取目标文件。",
+                "read_file": "此项目不提供通用文件读取，本工具总是拒绝。分析 CSV 请委派 experiment-analyst；新建报告前无需读取目标文件。",
                 "write_file": "新建 Markdown 报告。file_path 必须是 /reports/<name>.md 虚拟路径，例如 /reports/F1_comparison.md；禁止传主机绝对路径。无需先调用 read_file；目标存在时会拒绝覆盖。content 是完整报告。",
             },
         )],
