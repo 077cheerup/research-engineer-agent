@@ -22,6 +22,24 @@ class AgentRunError(RuntimeError):
     """The graph ran without satisfying the observable research contract."""
 
 
+def verify_report_evidence(saved: str, analysis: dict) -> None:
+    """Allow separate report sections; keep each trusted evidence block intact.
+
+    The deterministic formatter emits provenance, final statistics and mean
+    convergence as three blank-line-separated blocks. This is not a check
+    for scattered numbers: complete source text and both full tables must match.
+    """
+    report = normalize_evidence(saved)
+    blocks = normalize_evidence(analysis["evidence_markdown"]).split("\n\n")
+    names = ("来源信息", "最终统计表", "平均收敛表")
+    missing = [name for name, block in zip(names, blocks, strict=True) if block not in report]
+    if missing:
+        raise AgentRunError(
+            "报告数值证据缺失或被修改：" + "、".join(missing)
+            + "（允许分章节放置，需保留完整证据块；仅忽略行尾空白）"
+        )
+
+
 def verify_run(
     messages: list, *, root: Path, csv: Path, function: str, destination: Path,
     run_evidence: RunEvidence,
@@ -68,8 +86,7 @@ def verify_run(
     saved = destination.read_text(encoding="utf-8")
     if saved != written_content:
         raise AgentRunError("磁盘报告与实际 write_file 调用内容不一致")
-    if normalize_evidence(evidence["evidence_markdown"]) not in normalize_evidence(saved):
-        raise AgentRunError("报告数值证据片段与 Python Tool 结果不匹配（忽略行尾空白后仍有差异；请核对数值、来源与表格内容）")
+    verify_report_evidence(saved, evidence)
     if "模拟数据" not in saved:
         raise AgentRunError("报告缺少模拟数据声明")
     final = messages[-1] if messages else None

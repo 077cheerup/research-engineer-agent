@@ -102,6 +102,11 @@ class ScriptedResearchModel(BaseChatModel):
                 table = table.replace("| A | 5 |", "| A | 999 |")
             if self.mode == "markdown_breaks":
                 table = table.replace("\n", "  \n")
+            if self.mode == "split_evidence":
+                table = "\n\n## 数据说明\n\n" + table.replace("\n\n", "\n\n## 下一部分\n\n解释段落。\n\n")
+            missing_blocks = {"missing_source": 0, "missing_final": 1, "missing_curve": 2}
+            if self.mode in missing_blocks:
+                table = "\n\n".join(block for index, block in enumerate(table.split("\n\n")) if index != missing_blocks[self.mode])
             return self.call("write_file", {
                 "file_path": f"{self.workspace}/reports/result.md" if self.mode == "host_path" else "/reports/result.md",
                 "content": "# 离线 Fake Model 流程验证\n\n模拟数据，非正式 CEC2013；无显著性检验。\n\n" + table,
@@ -124,7 +129,7 @@ def workspace(tmp_path):
     return tmp_path
 
 
-@pytest.mark.parametrize("mode", ["normal", "markdown_breaks"])
+@pytest.mark.parametrize("mode", ["normal", "markdown_breaks", "split_evidence"])
 def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
     model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     trace = []
@@ -146,6 +151,7 @@ def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
 @pytest.mark.parametrize("mode,message", [
     ("no_tools", "未成功调用 task"), ("no_write", "write_file"),
     ("bad_numbers", "数值证据"), ("loop", "步数上限"), ("parallel_write", "write_file"),
+    ("missing_source", "来源信息"), ("missing_final", "最终统计表"), ("missing_curve", "平均收敛表"),
 ])
 def test_incomplete_runs_never_pass(workspace, mode, message):
     model = ScriptedResearchModel(workspace=str(workspace), mode=mode)

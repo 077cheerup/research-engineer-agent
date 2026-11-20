@@ -173,6 +173,8 @@ agent = create_deep_agent(
 
 第二层（`main.py:verify_run()`）：核对 Main 的真实 `task` 目标及调用 ID；`verify_analysis()` 将 task JSON 与该 ID 绑定的记录逐项比较；只有取得可信 task 结果之后的 `write_file` 才有效。再验证磁盘文件、实际写入内容、完整数值证据、模拟数据声明和最终路径。同一批同时调用 task 与 write_file 不能冒充先分析后写入。Main 的消息不包含子图的内部 ToolMessage。
 
+报告中的证据由 `verify_report_evidence()` 分别核对三个完整块：来源信息、最终统计表、平均收敛表。允许把它们放在不同章节、在块之间添加解释，不要求整段连续出现；每块内的全部文本和数值仍须匹配，仅忽略行尾空白。缺块或改数值会指出具体证据块，不能只靠零散数字通过验收。
+
 Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。本阶段不增加语义判定器或新的分析公式，仍需人工审阅解释。
 
 ## 核心函数与 Tool Schema
@@ -225,7 +227,7 @@ Tool 输入为 JSON 对象，两个字段都必填：
 
 所有统计基于每个种子**最后一个 FE 的 fitness**。标准差使用 `ddof=1`；`Best=min`、`Worst=max`；平均收敛曲线按相同 FE 跨 seed 平均。均值并列时在 `lowest_mean_algorithms` 中保留所有并列算法；排名列表以名称打破排序歧义，不代表并列算法有优劣。未做 Wilcoxon/Friedman 等检验。
 
-校验失败时抛出 `ToolException`，LangChain 将其转为错误 ToolMessage；不会把错误字符串当统计结果。统计 JSON 保留 Python 浮点精度；`evidence_markdown` 使用 12 位有效数字，包含数据路径、SHA256、最终统计表和完整平均收敛表。LLM 原样嵌入该证据片段，并独立生成解释段落。
+校验失败时抛出 `ToolException`，LangChain 将其转为错误 ToolMessage；不会把错误字符串当统计结果。统计 JSON 保留 Python 浮点精度；`evidence_markdown` 使用 12 位有效数字，包含数据路径、SHA256、最终统计表和完整平均收敛表。Main 可将三个完整证据块放在不同章节，并独立生成解释段落。
 
 ## 离线测试
 
@@ -297,10 +299,12 @@ PY
 | --- | --- |
 | Phase 2.1 修改前基线 | **57 passed**，含先前的路径诊断和 Markdown 行尾空白修复 |
 | Phase 2.1 全套离线测试 | **71 passed**；原 57 项回归保留/适配委派角色，新增 14 个参数化测试用例 |
+| 分章节证据核验修复后 | **75 passed in 0.87s**；新增分章节合法报告及三个证据块缺失的回归测试 |
 | 统计公式和 CSV 数据 | `analysis.py` 与 sample CSV 无改动；依赖锁定仍为 DeepAgents 0.7.40 |
 | 新测试覆盖 | 工具隔离、上下文隔离、完整 task JSON、证据丢失/篡改、无工具执行、错误参数、子图越权写入、记录隔离、写入失败及限步 |
 | Phase 1 用户本地真实运行 | 用户提供的 trace 已观察到端到端分析、写入和 CLI 验收成功；不等于解释语义完全正确 |
-| Phase 2.1 真实远程模型 | **本次未执行、未验证**；需显式运行手动脚本，不能沿用 Phase 1 成功记录 |
+| 用户 Phase 2.1 远程 trace 和报告 | 真实 task、子工具程序验证和 write_file 成功；原 CLI 因证据分章节误报。现有 F1_phase21_live.md 的三个证据块已独立重算核对通过 |
+| 修复后完整远程验收 | **尚未重跑**；最终回答路径及远程写入失败案例仍需显式手动验证 |
 
 整个 pytest 套件禁止 HTTP 和 socket。真实 API 测试不被 pytest 收集，也不会因缺密钥而记为通过。本机使用可写缓存：`UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`；正常开发环境可直接用 `uv sync`、`uv run pytest -q`。
 
