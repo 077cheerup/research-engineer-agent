@@ -27,6 +27,7 @@ class ScriptedResearchModel(BaseChatModel):
     task_descriptions: list[str] = Field(default_factory=list)
     main_history: list[Any] = Field(default_factory=list)
     child_history: list[Any] = Field(default_factory=list)
+    child_final: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def _llm_type(self) -> str:
@@ -49,7 +50,7 @@ class ScriptedResearchModel(BaseChatModel):
         self.child_history = list(messages)
         results = [m for m in messages if isinstance(m, ToolMessage)]
         if self.mode == "child_no_tool":
-            return AIMessage(content='{"evidence_markdown":"claimed evidence","significance_tested":false}')
+            return AIMessage(content='{"source_sha256":"claimed reference","significance_tested":false}')
         if not results or self.mode == "child_loop":
             csv = "data/other.csv" if self.mode == "child_wrong_csv" else "data/sample_experiments.csv"
             function = "F2" if self.mode == "child_wrong_function" else "F1"
@@ -67,16 +68,17 @@ class ScriptedResearchModel(BaseChatModel):
             return AIMessage(content="算法 B 更好。未做显著性检验。")
         data = json.loads(successful[-1].content)
         reply = {
-            "evidence_markdown": data["evidence_markdown"],
+            "source_sha256": data["source"]["sha256"],
             "conclusions": {"final_performance": "B 最终均值较低。", "stability": "B 的样本标准差较低。", "convergence": "B 在各采样点均值较低，不代表差距持续扩大。"},
             "significance_tested": False,
         }
-        if self.mode == "child_missing_evidence":
-            del reply["evidence_markdown"]
-        if self.mode == "child_bad_evidence":
-            reply["evidence_markdown"] = reply["evidence_markdown"].replace("| A | 5 |", "| A | 999 |")
+        if self.mode == "child_missing_reference":
+            del reply["source_sha256"]
+        if self.mode == "child_bad_reference":
+            reply["source_sha256"] = "0" * 64
         if self.mode == "child_significance":
             reply["significance_tested"] = True
+        self.child_final = reply
         return AIMessage(content=json.dumps(reply, ensure_ascii=False))
 
     def main_reply(self, messages):
@@ -261,8 +263,8 @@ def test_required_read_tool_cannot_read_dotenv(workspace):
     ("child_no_tool", "未真正成功执行"),
     ("child_tool_error", "未真正成功执行"),
     ("child_summary", "不能只返回自然语言"),
-    ("child_missing_evidence", "完整数值证据"),
-    ("child_bad_evidence", "完整数值证据"),
+    ("child_missing_reference", "缺少数据来源引用"),
+    ("child_bad_reference", "与真实工具记录不一致"),
     ("child_significance", "significance_tested=false"),
     ("child_wrong_csv", "CSV 或 Function"),
     ("child_wrong_function", "CSV 或 Function"),
@@ -309,6 +311,10 @@ def test_task_transports_full_verified_result_without_child_messages(workspace):
     assert payload["analysis"] == expected
     assert payload["significance_tested"] is False
     assert set(payload["conclusions"]) == {"final_performance", "stability", "convergence"}
+    # The model returns a reference and prose only; the real tool's complete
+    # evidence reaches Main through the verified programmatic task transport.
+    assert "evidence_markdown" not in model.child_final
+    assert model.child_final["source_sha256"] == expected["source"]["sha256"]
     assert not any(isinstance(m, ToolMessage) and m.name == "analyze_experiment" for m in state["messages"])
     assert any(isinstance(m, ToolMessage) and m.name == "analyze_experiment" for m in model.child_history)
     # A real task JSON alone is not proof in another run.
@@ -320,6 +326,11 @@ def test_task_transports_full_verified_result_without_child_messages(workspace):
     forged["analysis"]["algorithms"]["A"]["mean"] = 999
     with pytest.raises(AnalysisVerificationError, match="不一致"):
         verify_analysis(task_message.tool_call_id, json.dumps(forged), audit, csv_path="data/sample_experiments.csv", function_name="F1")
+    for key in ("evidence_markdown", "mean_convergence", "algorithms", "source"):
+        incomplete = json.loads(task_message.text)
+        del incomplete["analysis"][key]
+        with pytest.raises(AnalysisVerificationError, match="证据丢失或被修改"):
+            verify_analysis(task_message.tool_call_id, json.dumps(incomplete), audit, csv_path="data/sample_experiments.csv", function_name="F1")
 
 
 def test_run_evidence_is_not_reused(workspace):

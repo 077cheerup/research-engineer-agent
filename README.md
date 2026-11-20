@@ -92,7 +92,7 @@ uv run python scripts/generate_sample.py
           -> task(subagent_type="experiment-analyst", description="CSV + Function")
              -> 隔离的 Analysis Subagent（create_agent）
                 -> analyze_experiment -> 原有确定性统计
-                -> JSON 证据片段 + 中文结论
+                -> JSON 来源引用 + 中文结论
              -> 程序核对真实工具记录、证据及参数
              -> task ToolMessage：完整可信 analysis + conclusions
           -> 内置 write_file -> ReportFilesystemBackend -> reports/*.md
@@ -145,7 +145,7 @@ agent = create_deep_agent(
 
 ```json
 {
-  "evidence_markdown": "完整复制 analyze_experiment 的证据片段",
+  "source_sha256": "工具结果 source.sha256 的完整字符串",
   "conclusions": {
     "final_performance": "中文解释",
     "stability": "中文解释",
@@ -157,9 +157,9 @@ agent = create_deep_agent(
 
 兼容层不会信任“已调用工具”的自述。`make_analyze_experiment(..., on_success=...)` 在原有统计成功之后调用 Python 回调，记录实际 CSV、Function 和结果深拷贝；模型既没有回调参数，也没有记录器对象。每次 task 调用有自己的局部记录列表，`run_agent()` 每次创建新的 `RunEvidence`，没有全局可变记录。
 
-第一层（`subagent.py`）：要求真实成功工具记录、实际 CSV/Function 符合运行目标、模型返回完整匹配的证据片段、三类非空结论、`significance_tested=false`。只有摘要、伪造调用、错误参数、丢失或修改证据均失败。数值有效性由原有 CSV 校验和统计函数保证，JSON 另要求不含 NaN/Infinity。
+第一层（`subagent.py`）：要求真实成功工具记录、实际 CSV/Function 符合运行目标、子模型返回的 `source_sha256` 与该工具结果完全一致、三类非空结论、`significance_tested=false`。只有摘要、未执行工具、错误参数、引用缺失或错误均失败。数值有效性由原有 CSV 校验和统计函数保证，JSON 另要求不含 NaN/Infinity。
 
-核验成功后，程序从**真实工具记录**补入完整精度原始统计，不要求模型重新抄写浮点数。Main 收到的 task JSON 为：
+核验成功后，程序从**真实工具记录**直接附入完整统计与 `evidence_markdown`，不要求子模型重新抄写浮点数或 Markdown 表格。先前的复制契约会因模型漏行或重排而失败；现在删除这一重复搬运步骤，来源校验、实际执行证明与 task 完整性检查仍保留。Main 收到的 task JSON 为：
 
 ```text
 {
@@ -169,7 +169,7 @@ agent = create_deep_agent(
 }
 ```
 
-`analysis` 保留函数、优化方向、路径/SHA256、每个 seed 最终值、每算法最终统计、平均曲线和完整 `evidence_markdown`。这不是用自然语言摘要替代数据：子模型必须保留证据，完整数字由可信工具记录传递。
+`analysis` 保留函数、优化方向、路径/SHA256、每个 seed 最终值、每算法最终统计、平均曲线和完整 `evidence_markdown`。这不是用自然语言摘要替代数据：`task` 结果必须保留完整可信证据，程序将实际统计与子模型结论合并后返回；`verify_analysis()` 会拒绝丢失或篡改任一数据字段的 task 结果。
 
 第二层（`main.py:verify_run()`）：核对 Main 的真实 `task` 目标及调用 ID；`verify_analysis()` 将 task JSON 与该 ID 绑定的记录逐项比较；只有取得可信 task 结果之后的 `write_file` 才有效。再验证磁盘文件、实际写入内容、完整数值证据、模拟数据声明和最终路径。同一批同时调用 task 与 write_file 不能冒充先分析后写入。Main 的消息不包含子图的内部 ToolMessage。
 
@@ -303,8 +303,11 @@ PY
 | 统计公式和 CSV 数据 | `analysis.py` 与 sample CSV 无改动；依赖锁定仍为 DeepAgents 0.7.40 |
 | 新测试覆盖 | 工具隔离、上下文隔离、完整 task JSON、证据丢失/篡改、无工具执行、错误参数、子图越权写入、记录隔离、写入失败及限步 |
 | Phase 1 用户本地真实运行 | 用户提供的 trace 已观察到端到端分析、写入和 CLI 验收成功；不等于解释语义完全正确 |
+| 子模型来源引用契约修复后 | **75 passed**；验证模型不抄表时 task 仍含完整原始证据，缺引用/错引用/无工具执行/传输字段丢失仍失败 |
 | 用户 Phase 2.1 远程 trace 和报告 | 真实 task、子工具程序验证和 write_file 成功；原 CLI 因证据分章节误报。现有 F1_phase21_live.md 的三个证据块已独立重算核对通过 |
-| 修复后完整远程验收 | **尚未重跑**；最终回答路径及远程写入失败案例仍需显式手动验证 |
+| 来源引用修复后真实远程正常链路 | **已实际运行并通过技术验收**：真实 task、子工具执行验证、完整统计传输、write_file、磁盘内容与最终路径；报告为 reports/F1_phase21_reference_check.md，另已独立重算核对证据 |
+| 真实运行的解释质量 | 最终摘要仍出现无显著性检验依据的“显著低于”；技术验收不代表自然语言结论完全正确，仍需人工审阅 |
+| 修复后远程写入失败案例 | **未执行**；离线 Fake Model 已覆盖，不能视为远程通过 |
 
 整个 pytest 套件禁止 HTTP 和 socket。真实 API 测试不被 pytest 收集，也不会因缺密钥而记为通过。本机使用可写缓存：`UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`；正常开发环境可直接用 `uv sync`、`uv run pytest -q`。
 
@@ -312,7 +315,7 @@ PY
 
 仅增加一个负责实验分析的子 Agent，验证委派后的工具权限、数据证据和上下文隔离。不增加统计公式、数据库、前端、容器、MCP、Skills、Memory、Planning、HITL、昂贵实验或自动改算法。
 
-模型须支持普通 tools/tool_calls，并能返回包含完整证据的 JSON 文本；格式不合约会明确失败，不回退成伪成功。解释仍可能出错，完整证据不等于语义正确。记录器是进程内、单次运行的验证辅助，不是持久审计系统；版本依赖点是 CompiledSubAgent structured_response、task metadata ID 和同名 Middleware 替换，升级需重跑回归。
+模型须支持普通 tools/tool_calls；子模型须返回含来源 SHA256 和结论的 JSON，完整证据通过真实工具记录直接传输。格式不合约会明确失败，不回退成伪成功。解释仍可能出错，完整证据不等于语义正确。记录器是进程内、单次运行的验证辅助，不是持久审计系统；版本依赖点是 CompiledSubAgent structured_response、task metadata ID 和同名 Middleware 替换，升级需重跑回归。
 
 ## 文件结构
 

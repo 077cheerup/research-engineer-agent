@@ -52,7 +52,7 @@ def _parse_child_reply(message: Any) -> dict:
     try:
         reply = json.loads(text)
     except (TypeError, ValueError) as exc:
-        raise AnalysisVerificationError("子 Agent 必须返回 JSON 及完整数值证据，不能只返回自然语言摘要") from exc
+        raise AnalysisVerificationError("子 Agent 必须返回 JSON 及数据来源引用，不能只返回自然语言摘要") from exc
     if not isinstance(reply, dict):
         raise AnalysisVerificationError("子 Agent 输出必须是 JSON 对象")
     return reply
@@ -89,9 +89,10 @@ def make_analyst(root: Path, model: BaseChatModel, evidence: RunEvidence, *, max
         if ((evidence.csv_path is not None and trusted["csv_path"] != evidence.csv_path)
                 or (evidence.function_name is not None and trusted["function_name"] != evidence.function_name)):
             raise AnalysisVerificationError("子 Agent 实际分析的 CSV 或 Function 与本次任务不符")
-        returned_evidence = reply.get("evidence_markdown")
-        if not isinstance(returned_evidence, str) or normalize_evidence(returned_evidence) != normalize_evidence(trusted["analysis"]["evidence_markdown"]):
-            raise AnalysisVerificationError("子 Agent 丢失或修改了完整数值证据 evidence_markdown")
+        if not isinstance(reply.get("source_sha256"), str):
+            raise AnalysisVerificationError("子 Agent 缺少数据来源引用 source_sha256，不能只返回摘要")
+        if reply["source_sha256"] != trusted["analysis"]["source"]["sha256"]:
+            raise AnalysisVerificationError("子 Agent 的 source_sha256 与真实工具记录不一致")
         conclusions = reply.get("conclusions")
         if not isinstance(conclusions, dict) or any(
             not isinstance(conclusions.get(key), str) or not conclusions[key].strip()
@@ -101,8 +102,8 @@ def make_analyst(root: Path, model: BaseChatModel, evidence: RunEvidence, *, max
         if reply.get("significance_tested") is not False:
             raise AnalysisVerificationError("子 Agent 必须明确声明 significance_tested=false")
         payload = {"analysis": trusted["analysis"], "conclusions": conclusions, "significance_tested": False}
-        # All full-precision stats, per-seed finals, hash and curves come from
-        # the real tool callback, never from model-generated float copies.
+        # Statistics AND Markdown evidence are transported from the real tool,
+        # rather than asking a model to regenerate either representation.
         json.dumps(payload, allow_nan=False)
         evidence.completed[task_id] = deepcopy({**trusted, "payload": payload})
         return {"messages": [], "structured_response": payload}

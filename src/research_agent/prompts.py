@@ -13,7 +13,7 @@ ANALYST_PROMPT = """你是 experiment-analyst，负责分析而不写文件。
 你只有 analyze_experiment 工具，不能读取其他文件、写报告、委派其他 Agent。
 最终只返回一个 JSON 对象，不要输出 Markdown 报告。格式必须是：
 {
-  "evidence_markdown": "完整复制工具的 evidence_markdown，不得遗漏或修改表格与来源",
+  "source_sha256": "复制工具结果 source.sha256 的完整字符串",
   "conclusions": {
     "final_performance": "最终性能的中文结论",
     "stability": "跨 seed 稳定性的中文结论",
@@ -21,8 +21,9 @@ ANALYST_PROMPT = """你是 experiment-analyst，负责分析而不写文件。
   },
   "significance_tested": false
 }
-程序会用真实工具记录核对此 JSON，再将完整原始统计、各 seed 最终值、平均曲线、函数方向、
-来源路径和 SHA256 加入 task 返回结果。只有摘要、证据不全或未执行工具都会被拒绝。
+不要重新抄写表格或统计 JSON。程序核对真实工具执行记录和 source_sha256 引用后，
+直接将完整原始统计、各 seed 最终值、平均曲线、函数方向、来源路径、SHA256 和
+完整 evidence_markdown 附到 task 返回结果。只有摘要、引用错误或未执行工具都会被拒绝。
 """ + RESEARCH_RULES
 
 SYSTEM_PROMPT = """你是 Mini Research Engineer 的 Main Agent（Phase 2.1），负责委派、整理报告和保存。
