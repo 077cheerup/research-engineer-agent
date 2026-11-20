@@ -221,7 +221,25 @@ child = create_agent(
 
 报告中的证据由 `verify_report_evidence()` 分别核对三个完整块：来源信息、最终统计表、平均收敛表。允许把它们放在不同章节、在块之间添加解释，不要求整段连续出现；每块内的全部文本和数值仍须匹配，仅忽略行尾空白。缺块或改数值会指出具体证据块，不能只靠零散数字通过验收。
 
-Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。本阶段不增加语义判定器或新的分析公式，仍需人工审阅解释。
+Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。本次只增加下述有限语言检查，不增加通用语义判定器或新的统计公式，仍需人工审阅解释。
+
+## 统计语言核验（Phase 2.2 修复）
+
+真实运行已证明 Skill 成功读取不等于输出语义正确。`reports/F1_phase22.md` 中出现了不受当前模拟样本支持的“全程领先”等概括；用户提供的 Main 最终回答还有“显著更优”与“未进行检验”的矛盾。原验证只检查统计证据和执行链，没有审查这些文字。历史 task conclusions 未保存，原 trace 也不包含它们，因此不能断言措辞最初来自子模型还是 Main 的改写。
+
+本次只增加 `statistical_language.py:verify_statistical_language()`，复用于三个输出位置：
+
+- 子 Agent 的三个 `conclusions` 字段，在发布可信 task 结果前检查；
+- `verify_run()` 检查实际保存的 Markdown 正文；
+- `verify_run()` 检查实际 Main 最终回答，全部检查通过之后 CLI 才打印“已核验报告”。
+
+显著性状态取自可信 Python 工具的 `analysis.comparison.significance_tested`，不以模型自己的声明为准。未检验时拒绝常见的“显著更优/低于/更稳定”“存在统计学显著差异”等正向断言。另检查采样点被强化为“全程/每个阶段领先”、未经计算的速度优势，以及未限定样本的种子/稳定性概括或真实 CEC2013 优势。
+
+按标点与转折划分局部子句，允许“不能据此宣称显著更优”“较小 Std 不等于显著更稳定”等否定；“未做检验，但 B 显著更优”中的后半句仍会失败。不是简单禁止“显著”一词，也不把一个段落开头的免责声明当作后文所有断言的豁免。推荐使用“当前模拟样本中均值较低”“样本标准差较小”“已记录 FE 采样点的均值较低”等具体表述。
+
+Main Prompt 仅补充报告与最终回答必须保持同一描述性边界。现有 Analyst Prompt、Skill 内容、渐进加载、Backend 和统计公式不改。trace 新增 `analysis_conclusions`，显示程序已经接收的子结论，便于下一次对照 Main 的报告与最终回答，不新增持久日志系统。
+
+**范围与局限**：这是针对当前项目常见中文措辞的有限规则，不是完整语法或统计推理。复杂引用、跨句限定、双重否定、同义改写可能漏检或误报；它不验证任意派生数字，也不能证明每句结论正确。检查在验收阶段运行；文件若已写入，会作为未验收产物保留，不自动删除或覆盖。原有精确数值证据核验继续执行。
 
 ## 核心函数与 Tool Schema
 
@@ -301,6 +319,7 @@ task_target experiment-analyst
 tool_result task id=... status=success
 subagent_analysis_verified subagent=experiment-analyst task_id=...
 skill_load_verified {"name": "experiment-analysis", "path": "/skills/experiment-analysis/SKILL.md", "sha256": "..."}
+analysis_conclusions { ...已接收的子 Agent 结论... }
 analysis_evidence { ...来自子图真实工具执行记录的统计... }
 tool_call write_file id=...
 tool_path {"file_path": "/reports/F1_comparison.md"}
@@ -352,7 +371,9 @@ PY
 | 权限与失败 | 非白名单拒绝、缺失/无效 Skill、仅读一行、跳过读取、伪造已加载声明均覆盖 |
 | 使用阶段 | Fake Model 从真实读取的 Skill 表格提取推荐表述，覆盖均值显著性、Std 显著性和单点速度误推；保持模拟声明、不新增百分比等统计 |
 | Phase 2.1 真实模型 | 之前正常链路已通过技术验收；不等于本阶段 Skill 的远程效果已验证 |
-| Phase 2.2 真实模型 | **未执行**；本任务按要求只运行离线测试，手动入口保留 |
+| Phase 2.2 用户真实模型运行 | 用户报告 task、Skill 加载、write_file 和最终验收均通过，但 Main 文字仍有不严谨断言；本次针对这一已发生问题修复 |
+| 统计语言修复后 | **130 项离线测试通过**；保留原 99 项，新增 31 项规则与三输出位置/CLI 回归用例 |
+| 修复后真实模型 | **尚未重跑**；使用新报告名或显式手动入口验证，不能将 Fake Model 通过视为远程通过 |
 
 整个 pytest 套件禁止 HTTP 和 socket。Fake Model 测试验证调用协议、信息暴露和证据传递，**不能证明真实模型理解或遵守专业规范**。真实 API 测试不被 pytest 收集，不会因缺密钥记为通过。本机使用可写缓存 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`；普通环境可直接 `uv run pytest -q`。
 
@@ -360,7 +381,7 @@ PY
 
 仅增加一个专业分析 Skill 与受限读取，未增加子 Agent、统计公式、数据库、前端、MCP、Memory、Planning、HITL 或自动实验。当前 CLI 只处理实验分析，因此这一类任务必须实际加载适用 Skill 才验收。
 
-专业规范没有复制进 System Prompt，也没有语义判定器。模型仍可能误用“显著”或由水平误推速度，Main 也可能在整理时改写结论；真实模型效果与全文语义仍需手动审阅。记录器是进程内单次运行的验证辅助，不是持久审计系统。
+专业规范没有复制进 System Prompt；仅在输出边界增加上述有限语言规则，没有通用语义判定器。模型仍可能通过未覆盖的改写产生错误推断，Main 也可能在整理时改变限定范围；真实模型效果与全文语义仍需手动审阅。记录器是进程内单次运行的验证辅助，不是持久审计系统。
 
 版本依赖点包括 SkillsMiddleware 的 ls/download_files 发现接口、内部 Skill 元数据状态、FilesystemMiddleware 的 read_file，以及原有 task metadata ID、structured_response 和同名 Middleware 替换。依赖未升级；升级时应重跑回归。源码工作区运行仍是支持的使用方式，wheel 不单独打包 skills/data 资源。
 
@@ -382,6 +403,7 @@ research-engineer-agent/
 │   ├── analysis.py
 │   ├── subagent.py
 │   ├── skill_backend.py
+│   ├── statistical_language.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
@@ -396,7 +418,8 @@ research-engineer-agent/
     ├── test_analysis.py
     ├── test_experiment_tool.py
     ├── test_agent_setup.py
-    └── test_skills.py
+    ├── test_skills.py
+    └── test_statistical_language.py
 ```
 
 GitHub 仓库：[077cheerup/research-engineer-agent](https://github.com/077cheerup/research-engineer-agent)。按完成并验证的阶段提交和推送，密钥与运行报告不上传。

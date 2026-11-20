@@ -16,6 +16,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 from research_agent.agent import ConfigurationError, build_agent, report_path
 from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
+from research_agent.statistical_language import StatisticalLanguageError, verify_statistical_language
 
 
 class AgentRunError(RuntimeError):
@@ -46,8 +47,8 @@ def verify_run(
 ) -> dict[str, Any]:
     """Require real ToolMessages, correct ordering, evidence, and disk content.
 
-    Natural-language reasoning is still reviewed by the human; these checks
-    verify the exact numeric tables, not every possible claim in the prose.
+    Exact evidence and selected unsupported language are checked. General
+    natural-language correctness still requires human review.
     """
     calls = {}
     evidence = None
@@ -95,6 +96,13 @@ def verify_run(
     relative = destination.relative_to(root).as_posix()
     if relative not in final.text or str(destination) not in final.text:
         raise AgentRunError("Agent 最终回答未包含实际报告路径")
+    try:
+        for context, text in (("Markdown 报告：", saved), ("Main 最终回答：", final.text)):
+            verify_statistical_language(
+                text, significance_tested=evidence["comparison"]["significance_tested"], context=context,
+            )
+    except StatisticalLanguageError as exc:
+        raise AgentRunError(str(exc)) from exc
     return {"summary": final.text, "report_path": str(destination), "analysis": evidence}
 
 
@@ -155,6 +163,7 @@ def run_agent(
                             trace(f"subagent_analysis_verified subagent={ANALYST_NAME} task_id={message.tool_call_id}")
                             skill = run_evidence.completed[message.tool_call_id]["payload"]["skill"]
                             trace("skill_load_verified " + json.dumps(skill, ensure_ascii=False))
+                            trace("analysis_conclusions " + json.dumps(run_evidence.completed[message.tool_call_id]["payload"]["conclusions"], ensure_ascii=False))
                             trace("analysis_evidence " + json.dumps(run_evidence.completed[message.tool_call_id]["analysis"], ensure_ascii=False, allow_nan=False))
     except GraphRecursionError as exc:
         raise AgentRunError("达到运行步数上限；可能存在重复 Tool Calling，报告未验收") from exc

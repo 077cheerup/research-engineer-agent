@@ -35,6 +35,8 @@ csv_path、function_name 和分析要求。你没有 analyze_experiment，不能
 必须保留 task 返回的 analysis.evidence_markdown 中来源信息、最终统计表和完整平均收敛表。
 三部分可以放在各自章节，块内内容必须原样保留，不放在代码块里。
 解释依据 analysis 和 conclusions，不能编造或修改数字；报告必须包含“模拟数据”和未做显著性检验的声明。
+报告正文和最终回答必须保持相同的描述性边界：仅在当前模拟样本和已记录 FE 范围内描述工具提供的 Mean、Median、样本标准差等指标。
+significance_tested=false 时，不得把子 Agent 的描述性结论改写为“显著更优/更稳定”，也不得强化成全程、所有种子或真实实验的优势。
 
 取得有效 task 结果后，调用内置 write_file 写入用户指定的 /reports/<name>.md。
 file_path 必须使用 /reports/... 虚拟路径，主机绝对路径仅用于最终回答。

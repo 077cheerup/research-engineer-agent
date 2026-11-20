@@ -19,6 +19,7 @@ from langchain_core.runnables import RunnableConfig, RunnableLambda
 from research_agent.prompts import ANALYST_PROMPT
 from research_agent.tools.experiment import make_analyze_experiment
 from research_agent.skill_backend import SKILL_NAME, SKILL_PATH, SkillReadBackend
+from research_agent.statistical_language import StatisticalLanguageError, verify_statistical_language
 
 ANALYST_NAME = "experiment-analyst"
 
@@ -129,6 +130,14 @@ def make_analyst(root: Path, model: BaseChatModel, evidence: RunEvidence, *, max
             raise AnalysisVerificationError("子 Agent 缺少最终性能、稳定性或收敛趋势的自然语言结论")
         if reply.get("significance_tested") is not False:
             raise AnalysisVerificationError("子 Agent 必须明确声明 significance_tested=false")
+        try:
+            for key in ("final_performance", "stability", "convergence"):
+                verify_statistical_language(
+                    conclusions[key], significance_tested=trusted["analysis"]["comparison"]["significance_tested"],
+                    context=f"子 Agent conclusions.{key}：",
+                )
+        except StatisticalLanguageError as exc:
+            raise AnalysisVerificationError(str(exc)) from exc
         payload = {"analysis": trusted["analysis"], "conclusions": conclusions, "significance_tested": False, "skill": skill}
         # Statistics AND Markdown evidence are transported from the real tool,
         # rather than asking a model to regenerate either representation.
