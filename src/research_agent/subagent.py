@@ -15,6 +15,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.tools import tool
 
 from research_agent.prompts import ANALYST_PROMPT
 from research_agent.tools.experiment import make_analyze_experiment
@@ -46,19 +47,45 @@ class RunEvidence:
     completed: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-def _parse_child_reply(message: Any) -> dict:
-    if not isinstance(message, AIMessage) or message.tool_calls:
-        raise AnalysisVerificationError("子 Agent 缺少最终结构化分析结果")
-    text = message.text.strip()
-    if text.startswith("```json\n") and text.endswith("```"):
-        text = text[8:-3].strip()
-    try:
-        reply = json.loads(text)
-    except (TypeError, ValueError) as exc:
-        raise AnalysisVerificationError("子 Agent 必须返回 JSON 及数据来源引用，不能只返回自然语言摘要") from exc
-    if not isinstance(reply, dict):
-        raise AnalysisVerificationError("子 Agent 输出必须是 JSON 对象")
-    return reply
+@tool(return_direct=True)
+def submit_analysis(source_sha256: str, conclusions: dict[str, str], significance_tested: bool) -> dict:
+    """Finish analysis by submitting a source reference and three conclusions.
+
+    Call alone, after receiving successful read_file and analyze_experiment
+    results. This ends the analyst turn; do not output a JSON text response.
+
+    Args:
+        source_sha256: Exact source.sha256 from the actual analysis tool result.
+        conclusions: Chinese explanations with required keys final_performance,
+            stability, and convergence. Do not copy statistics or evidence tables.
+        significance_tested: Must be false; no significance test was performed.
+    """
+    # Only a submission envelope. Actual statistics and Skill receipts are
+    # still verified separately; this tool has no filesystem or Memory access.
+    return {"source_sha256": source_sha256, "conclusions": conclusions,
+            "significance_tested": significance_tested}
+
+
+submit_analysis.handle_validation_error = "submit_analysis 参数不合法：缺少数据来源引用或结论参数，或字段类型错误"
+
+
+def _submitted_reply(messages: list) -> dict:
+    last_call = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+    if (last_call is None or len(last_call.tool_calls) != 1
+            or last_call.tool_calls[0]["name"] != "submit_analysis"):
+        raise AnalysisVerificationError(
+            "子 Agent 未通过 submit_analysis 提交结构化结论；不能只返回自然语言摘要或手写 JSON 文本"
+        )
+    call_id = last_call.tool_calls[0]["id"]
+    message = messages[-1]
+    if (not isinstance(message, ToolMessage) or message.name != "submit_analysis"
+            or message.tool_call_id != call_id):
+        raise AnalysisVerificationError("缺少 submit_analysis 的真实工具执行结果")
+    if message.status != "success":
+        raise AnalysisVerificationError("submit_analysis 调用失败：缺少数据来源引用或结论参数，或字段类型错误")
+    # This JSON is serialized by the tool runtime from the Python return value,
+    # not generated as free text by the model.
+    return json.loads(message.text)
 
 
 def make_analyst(root: Path, model: BaseChatModel, evidence: RunEvidence, *, max_steps: int = 24) -> CompiledSubAgent:
@@ -81,7 +108,7 @@ def make_analyst(root: Path, model: BaseChatModel, evidence: RunEvidence, *, max
 
         child = create_agent(
             model=model,
-            tools=[make_analyze_experiment(root, on_success=record)],
+            tools=[make_analyze_experiment(root, on_success=record), submit_analysis],
             system_prompt=ANALYST_PROMPT,
             middleware=[
                 FilesystemMiddleware(backend=skill_backend, tools=["read_file"]),
@@ -112,7 +139,7 @@ def make_analyst(root: Path, model: BaseChatModel, evidence: RunEvidence, *, max
         if not loaded or not skill_backend.loaded:
             raise AnalysisVerificationError("子 Agent 未实际完整读取 experiment-analysis Skill，不能声称加载成功；请 read_file(limit=1000)")
         skill = skill_backend.loaded[-1]
-        reply = _parse_child_reply(result["messages"][-1])
+        reply = _submitted_reply(result["messages"])
         trusted = records[-1]
         if ((evidence.csv_path is not None and trusted["csv_path"] != evidence.csv_path)
                 or (evidence.function_name is not None and trusted["function_name"] != evidence.function_name)):

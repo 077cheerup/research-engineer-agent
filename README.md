@@ -95,7 +95,7 @@ uv run python scripts/generate_sample.py
                 -> SkillsMiddleware 发现名称/描述/路径
                 -> read_file：只读 experiment-analysis/SKILL.md
                 -> analyze_experiment -> 原有确定性统计
-                -> JSON 来源引用 + 中文结论
+                -> submit_analysis：提交来源引用 + 中文结论
              -> 程序核对真实工具记录、证据及参数
              -> task ToolMessage：完整可信 analysis + conclusions + skill 加载凭据
           -> 内置 write_file -> ReportFilesystemBackend -> reports/*.md
@@ -106,6 +106,7 @@ CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Mem
 | --- | --- | --- |
 | `task` | 仅可委派 experiment-analyst | 无 |
 | `analyze_experiment` | **不注册** | 保留，只读 data/ CSV |
+| `submit_analysis` | **不注册** | 提交来源引用和结论，无文件或 Memory 权限 |
 | `write_file` | 内置 Tool，仅新建 reports/*.md | **不注册** |
 | `read_file` | 框架要求注册，但 Backend 一律拒绝 | **新增**，只读指定 Skill 的虚拟路径 |
 | Memory 读写工具 | 不注册；由 Python 编排检索与验收后保存 | 不注册 |
@@ -159,7 +160,7 @@ skills/
 skill_backend = SkillReadBackend(root)
 child = create_agent(
     model=model,
-    tools=[make_analyze_experiment(root, on_success=record)],
+    tools=[make_analyze_experiment(root, on_success=record), submit_analysis],
     system_prompt=ANALYST_PROMPT,
     middleware=[
         FilesystemMiddleware(backend=skill_backend, tools=["read_file"]),
@@ -188,7 +189,7 @@ child = create_agent(
 
 ## 子 Agent 输出与两层验证
 
-子模型最终返回普通 JSON 文本，不要求第三方服务支持 JSON mode 或额外结构化输出工具：
+子模型在收到 Skill 全文和分析工具结果后，单独调用普通 LangChain Tool `submit_analysis`，提交以下参数，不再手写最终 JSON 文本：
 
 ```json
 {
@@ -202,9 +203,13 @@ child = create_agent(
 }
 ```
 
+`submit_analysis` 使用 `@tool(return_direct=True)`，仅将提交参数返回给子图 wrapper，不读取文件、不生成报告、不保存 Memory。锁定版本的 `create_agent()` 会在该工具单独执行后结束子图，无需模型再生成一次最终回答。wrapper 要求真实成功的提交 ToolMessage；其内容由工具运行时序列化，不从模型的自由文本中提取 JSON。只返回普通段落或文本 JSON 会给出明确的提交工具诊断。提交旁边附带自然语言说明不会影响参数解析。
+
+这是普通 Tool Calling，不启用服务端 JSON mode、ProviderStrategy 或强制 tool_choice。真实服务仍须正确支持工具参数；缺少字段、来源错误、没有实际分析或 Skill 加载时仍失败，不用自然语言补造结果。该修复只改变子 Agent 的提交方式，Main 的 task JSON 契约不变。
+
 兼容层不会信任“已调用工具”的自述。`make_analyze_experiment(..., on_success=...)` 在原有统计成功之后调用 Python 回调，记录实际 CSV、Function 和结果深拷贝；模型既没有回调参数，也没有记录器对象。每次 task 调用有自己的局部记录列表，`run_agent()` 每次创建新的 `RunEvidence`，没有全局可变记录。
 
-第一层（`subagent.py`）：要求真实成功工具记录、实际 CSV/Function 符合运行目标、子模型返回的 `source_sha256` 与该工具结果完全一致、三类非空结论、`significance_tested=false`。只有摘要、未执行工具、错误参数、引用缺失或错误均失败。数值有效性由原有 CSV 校验和统计函数保证，JSON 另要求不含 NaN/Infinity。
+第一层（`subagent.py`）：要求真实成功工具记录、实际 CSV/Function 符合运行目标、真实成功的 `submit_analysis` 调用及其 `source_sha256` 与该分析结果完全一致、三类非空结论、`significance_tested=false`。只有摘要、未执行工具、错误参数、引用缺失或错误均失败。数值有效性由原有 CSV 校验和统计函数保证，JSON 另要求不含 NaN/Infinity。
 
 核验成功后，程序从**真实工具记录**直接附入完整统计与 `evidence_markdown`，不要求子模型重新抄写浮点数或 Markdown 表格。先前的复制契约会因模型漏行或重排而失败；现在删除这一重复搬运步骤，来源校验、实际执行证明与 task 完整性检查仍保留。Main 收到的 task JSON 为：
 
@@ -223,7 +228,7 @@ child = create_agent(
 
 报告中的证据由 `verify_report_evidence()` 分别核对三个完整块：来源信息、最终统计表、平均收敛表。允许把它们放在不同章节、在块之间添加解释，不要求整段连续出现；每块内的全部文本和数值仍须匹配，仅忽略行尾空白。缺块或改数值会指出具体证据块，不能只靠零散数字通过验收。
 
-Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。本次只增加下述有限语言检查，不增加通用语义判定器或新的统计公式，仍需人工审阅解释。
+Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。程序不做统计语言拦截，也不增加新的统计公式，解释仍需人工审阅。
 
 ## 解释语言与验收边界
 
@@ -466,7 +471,9 @@ PY
 
 ## Phase 2.3 范围与限制
 
-只增加本地 JSON Memory 和 Python 编排，未增加子 Agent、Memory 写入 Tool、MemoryMiddleware、Checkpointer、向量数据库、RAG、MCP、Planning、HITL 或前端。Main 和 Analysis Subagent 的工具列表、Skill 白名单及统计公式不变。
+只增加本地 JSON Memory 和 Python 编排，未增加子 Agent、Memory 写入 Tool、MemoryMiddleware、Checkpointer、向量数据库、RAG、MCP、Planning、HITL 或前端。后续输出协议修复仅给 Analysis Subagent 增加 `submit_analysis`，替换手写 JSON；Main 工具列表、Skill 白名单及统计公式不变。
+
+2026-11-21 子 Agent 提交协议修复：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**130 passed in 3.83s**。新增/调整用例覆盖真实提交工具执行、提交附带说明文字、提交后直接结束子图、仅文本 JSON/摘要被拒绝、提前提交不能替代分析、缺失结论拒绝、CLI 失败不显示已核验且不保存 Memory。原有 Skill、数值篡改、权限、跨进程 Memory 与措辞不拦截测试继续通过。本次没有调用真实模型，不能将这些离线结果视为远程集成通过；可用 `uv run python scripts/manual_integration.py` 单独验证真实服务。
 
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 

@@ -145,7 +145,18 @@ class ScriptedResearchModel(BaseChatModel):
         return AIMessage(content=f"模拟数据摘要。报告已保存到 reports/result.md，绝对路径：{self.workspace}/reports/result.md")
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
-        message = self.child_reply(messages) if "analyze_experiment" in kwargs.get("offline_tools", []) else self.main_reply(messages)
+        is_child = "analyze_experiment" in kwargs.get("offline_tools", [])
+        message = self.child_reply(messages) if is_child else self.main_reply(messages)
+        if is_child and not message.tool_calls:
+            # Child reply builders remain convenient JSON fixtures, but the
+            # model now submits their arguments through a real tool call.
+            try:
+                reply = json.loads(message.text)
+            except ValueError:
+                pass  # Explicit plain-summary/error modes must still fail.
+            else:
+                if self.mode != "child_json_text":
+                    message = self.call("submit_analysis", reply, "child-submit")
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
@@ -168,7 +179,8 @@ def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
     result = run_agent(root=workspace, output="reports/result.md", model=model, trace=trace.append)
     assert {"task", "write_file"} <= set(model.bound_names)
     assert "analyze_experiment" not in model.bound_names
-    assert set(model.child_bound_names) == {"analyze_experiment", "read_file"}
+    assert set(model.child_bound_names) == {"analyze_experiment", "read_file", "submit_analysis"}
+    assert "submit_analysis" not in model.bound_names
     assert all("experiment-analyst" in d and "general-purpose" not in d for d in model.task_descriptions)
     assert not any(isinstance(m, ToolMessage) and m.name == "analyze_experiment" for m in model.main_history)
     assert "read_file" in model.bound_names  # Required by 0.7.40, permission denied.
@@ -293,6 +305,7 @@ def test_required_read_tool_cannot_read_dotenv(workspace):
     ("child_no_tool", "未真正成功执行"),
     ("child_tool_error", "未真正成功执行"),
     ("child_summary", "不能只返回自然语言"),
+    ("child_json_text", "submit_analysis"),
     ("child_missing_reference", "缺少数据来源引用"),
     ("child_bad_reference", "与真实工具记录不一致"),
     ("child_significance", "significance_tested=false"),
@@ -307,7 +320,7 @@ def test_subagent_failures_never_produce_report(workspace, mode, message):
         run_agent(root=workspace, output="reports/result.md", model=parent, analyst_model=child, max_steps=16)
     assert not (workspace / "reports/result.md").exists()
     assert "analyze_experiment" not in parent.bound_names
-    assert set(child.child_bound_names) == {"analyze_experiment", "read_file"}
+    assert set(child.child_bound_names) == {"analyze_experiment", "read_file", "submit_analysis"}
 
 
 @pytest.mark.parametrize("mode", ["direct_analysis", "wrong_target"])
