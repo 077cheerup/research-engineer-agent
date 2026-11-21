@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from research_agent.prompts import SYSTEM_PROMPT
+from research_agent.report import assemble_report
 from research_agent.tools.experiment import project_root
 from research_agent.subagent import ANALYST_NAME, RunEvidence, make_analyst, verify_analysis
 
@@ -32,7 +33,7 @@ class ReportState(AgentState):
 
 
 class ReportCompletionMiddleware(AgentMiddleware):
-    """One in-graph reminder for an observed premature final answer.
+    """Assemble trusted evidence before writing; remind once if writing is omitted.
 
     Does not retry failed writes or validate wording. State is scoped to one
     invocation and the normal graph recursion limit also bounds the reminder.
@@ -40,15 +41,46 @@ class ReportCompletionMiddleware(AgentMiddleware):
 
     state_schema = ReportState
 
-    def __init__(self, evidence: RunEvidence, relative_output: str):
+    def __init__(self, evidence: RunEvidence, relative_output: str | None):
         self.evidence = evidence
         self.relative_output = relative_output
+
+    def verified_payload(self, messages):
+        calls = {call["id"]: call for m in messages if isinstance(m, AIMessage) for call in m.tool_calls}
+        for message in reversed(messages):
+            if not isinstance(message, ToolMessage) or message.status != "success":
+                continue
+            call = calls.get(message.tool_call_id, {})
+            if (call.get("name") != "task"
+                    or call["args"].get("subagent_type") != ANALYST_NAME):
+                continue
+            record = self.evidence.completed.get(message.tool_call_id, {})
+            return verify_analysis(
+                message.tool_call_id, message.text, self.evidence,
+                csv_path=self.evidence.csv_path or record.get("csv_path"),
+                function_name=self.evidence.function_name or record.get("function_name"),
+            )
+        return None
 
     @hook_config(can_jump_to=["model"])
     def after_model(self, state, runtime):
         messages = state["messages"]
         final = messages[-1]
-        if (state.get("report_reminder_sent") or not isinstance(final, AIMessage)
+        if not isinstance(final, AIMessage):
+            return None
+        if any(call["name"] == "write_file" for call in final.tool_calls):
+            payload = self.verified_payload(messages[:-1])
+            if payload is not None:
+                # Replace the AIMessage by its ID before the real tool node.
+                # The effective submitted arguments therefore remain visible
+                # to verify_run, which still compares them exactly to disk.
+                submitted = final.model_copy(deep=True)
+                for call in submitted.tool_calls:
+                    if call["name"] == "write_file":
+                        call["args"]["content"] = assemble_report(call["args"]["content"], payload["analysis"])
+                return {"messages": [submitted]}
+            return None
+        if (self.relative_output is None or state.get("report_reminder_sent")
                 or final.tool_calls or final.invalid_tool_calls
                 or final.response_metadata.get("finish_reason") not in (None, "stop")):
             return None
@@ -57,23 +89,14 @@ class ReportCompletionMiddleware(AgentMiddleware):
         # verifier. Never overwrite a file or mask a real write failure.
         if any(call["name"] == "write_file" for call in calls.values()):
             return None
-        for message in reversed(messages):
-            if not isinstance(message, ToolMessage) or message.status != "success":
-                continue
-            call = calls.get(message.tool_call_id, {})
-            if (call.get("name") != "task"
-                    or call["args"].get("subagent_type") != ANALYST_NAME):
-                continue
-            # Only trusted current-run results can trigger continuation.
-            verify_analysis(message.tool_call_id, message.text, self.evidence,
-                            csv_path=self.evidence.csv_path, function_name=self.evidence.function_name)
+        if self.verified_payload(messages) is not None:
             return {
                 "report_reminder_sent": True,
                 "messages": [HumanMessage(content=(
                     "本次任务尚未完成：当前分析已核验，但你尚未调用 write_file。"
                     "历史报告仅供参考，不能替代本次输出。请使用刚才 task 的可信 analysis 和 conclusions，"
                     f"调用 write_file(file_path=\"/{self.relative_output}\", content=完整 Markdown 报告)，"
-                    "保留完整数值证据与模拟数据说明；无需重新分析。"
+                    "保留空的可信证据标记区域，由程序填入完整数值证据；保留模拟数据说明，无需重新分析。"
                     "等待写入成功后再返回摘要、本次报告相对路径及主机绝对路径。"
                 ))],
                 "jump_to": "model",
@@ -158,10 +181,8 @@ def build_agent(
         workspace, analyst_model if analyst_model is not None else main_model,
         run_evidence, max_steps=max_steps,
     )
-    completion = []
-    if report_output is not None:
-        relative_output = report_path(report_output, workspace).relative_to(workspace).as_posix()
-        completion.append(ReportCompletionMiddleware(run_evidence, relative_output))
+    relative_output = (report_path(report_output, workspace).relative_to(workspace).as_posix()
+                       if report_output is not None else None)
     return create_deep_agent(
         model=main_model,
         tools=[],
@@ -169,7 +190,7 @@ def build_agent(
         system_prompt=SYSTEM_PROMPT,
         # Public same-name replacement removes the default general-purpose
         # agent from the final task tool without a global profile registration.
-        middleware=[*completion, SubAgentMiddleware(
+        middleware=[ReportCompletionMiddleware(run_evidence, relative_output), SubAgentMiddleware(
             backend=backend, subagents=[analyst],
             task_description="委派实验分析任务。description 中必须包含 csv_path 和 function_name。只可使用以下子 Agent：\n{available_agents}\n返回经过程序核验的完整统计 JSON 和中文结论。",
         ), FilesystemMiddleware(
@@ -177,7 +198,7 @@ def build_agent(
             backend=backend, tools=["read_file", "write_file"],
             custom_tool_descriptions={
                 "read_file": "此项目不提供通用文件读取，本工具总是拒绝。分析 CSV 请委派 experiment-analyst；新建报告前无需读取目标文件。",
-                "write_file": "新建 Markdown 报告。file_path 必须是 /reports/<name>.md 虚拟路径，例如 /reports/F1_comparison.md；禁止传主机绝对路径。无需先调用 read_file；目标存在时会拒绝覆盖。content 是完整报告。",
+                "write_file": "新建 Markdown 报告。file_path 必须是 /reports/<name>.md 虚拟路径，例如 /reports/F1_comparison.md；禁止传主机绝对路径。无需先调用 read_file；目标存在时会拒绝覆盖。content 是报告草稿，必须含一组 <!-- BEGIN_ANALYSIS_EVIDENCE --> 与 <!-- END_ANALYSIS_EVIDENCE --> 空标记区域；程序从本次可信分析填入完整来源、SHA256 和统计证据。不要自行复制证据。",
             },
         )],
         name="mini-research-engineer",

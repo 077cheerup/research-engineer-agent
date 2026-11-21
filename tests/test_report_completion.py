@@ -117,7 +117,9 @@ def test_reminder_does_not_reset_step_budget(workspace):
 
 
 @pytest.mark.parametrize("mode", ["bad_numbers", "parallel_write"])
-def test_invalid_report_or_order_is_not_repaired(workspace, mode):
+def test_invalid_report_or_order_is_not_repaired(workspace, mode, monkeypatch):
+    if mode == "bad_numbers":
+        monkeypatch.setattr("research_agent.agent.assemble_report", lambda draft, analysis: draft)
     trace = []
     with pytest.raises(AgentRunError):
         run_agent(root=workspace, model=MemoryFakeModel(workspace=str(workspace), mode=mode),

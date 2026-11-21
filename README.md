@@ -98,7 +98,8 @@ uv run python scripts/generate_sample.py
                 -> submit_analysis：提交来源引用 + 中文结论
              -> 程序核对真实工具记录、证据及参数
              -> task ToolMessage：完整可信 analysis + conclusions + skill 加载凭据
-          -> 内置 write_file -> ReportFilesystemBackend -> reports/*.md
+          -> Python 从本次 RunEvidence 组装可信证据区域
+          -> 内置 write_file（组装后的实际参数）-> ReportFilesystemBackend -> reports/*.md
 CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Memory -> 摘要和真实路径
 ```
 
@@ -229,11 +230,22 @@ child = create_agent(
 
 第二层（`main.py:verify_run()`）：核对 Main 的真实 `task` 目标及调用 ID；`verify_analysis()` 将 task JSON 与该 ID 绑定的记录逐项比较；只有取得可信 task 结果之后的 `write_file` 才有效。再验证磁盘文件、实际写入内容、完整数值证据、模拟数据声明和最终路径。同一批同时调用 task 与 write_file 不能冒充先分析后写入。Main 的消息不包含子图的内部 ToolMessage。
 
+Main 的 `write_file.content` 现在是报告草稿，不再要求模型逐字复制来源、64 位 SHA256 或数值表。在草稿合适位置保留一组空的 HTML 标记（不要放进代码块）：
+
+```markdown
+<!-- BEGIN_ANALYSIS_EVIDENCE -->
+<!-- END_ANALYSIS_EVIDENCE -->
+```
+
+现有 `ReportCompletionMiddleware.after_model()` 在真实文件工具执行前，验证之前的 task 返回值与本次 `RunEvidence` 绑定记录，再用 `report.py:assemble_report()` 将两标记之间的全部内容替换为该记录的完整 `analysis.evidence_markdown`。即使模型在区域内复制了截断 SHA256、旧 Memory 的来源或错误统计，也不会保留这些副本。区域之外的解释、标题和顺序由 Main 决定，程序不修改其文字；建议把证据区域作为报告的数据依据章节。缺失、重复或倒序标记会明确失败，不猜测边界或继续保存 Memory。
+
+组装会按原 AIMessage ID 更新图中的实际 `write_file` 参数，随后仍执行 DeepAgents 内置工具和原 Backend。`verify_run()` 比较的是**组装后真正提交给工具的内容**与磁盘文件，并继续严格核对完整来源与两个统计表；未放宽 SHA256、数值或来源检查。历史记录只做参考，不作为组装来源。该机制不保证区域外的自由文本、派生数字或最终回答语义都正确，仍需人工审阅。
+
 报告中的证据由 `verify_report_evidence()` 分别核对三个完整块：来源信息、最终统计表、平均收敛表。允许把它们放在不同章节、在块之间添加解释，不要求整段连续出现；每块内的全部文本和数值仍须匹配，仅忽略行尾空白。缺块或改数值会指出具体证据块，不能只靠零散数字通过验收。
 
 Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。程序不做统计语言拦截，也不增加新的统计公式，解释仍需人工审阅。
 
-若 Main 已收到本次可信 task 结果，却在**从未尝试 write_file**时返回普通最终回答，`ReportCompletionMiddleware.after_model()` 用官方 `jump_to="model"` 在同一图内提醒一次完成本次新报告。提醒状态仅属于当前运行，不重置 `--max-steps`，不重新执行统计，也不在 Python 中替模型写报告。即使历史来自同一 CSV，也必须创建本次指定报告。忽略提醒仍会验收失败；已尝试写入、写入失败、证据错误、输出截断（length）、过滤（content_filter）或解析失败的工具调用不进入提醒路径。Skill/分析未通过时不能触发提醒，Memory 仍只在最终完整验收通过后保存。
+若 Main 已收到本次可信 task 结果，却在**从未尝试 write_file**时返回普通最终回答，`ReportCompletionMiddleware.after_model()` 用官方 `jump_to="model"` 在同一图内提醒一次完成本次新报告。提醒状态仅属于当前运行，不重置 `--max-steps`，不重新执行统计；Main 仍须生成草稿并实际调用内置写工具。即使历史来自同一 CSV，也必须创建本次指定报告。忽略提醒仍会验收失败；已尝试写入、写入失败、证据错误、输出截断（length）、过滤（content_filter）或解析失败的工具调用不进入提醒路径。Skill/分析未通过时不能触发提醒，Memory 仍只在最终完整验收通过后保存。
 
 ## 解释语言与验收边界
 
@@ -341,6 +353,7 @@ uv run python -m research_agent.main --output reports/F1_phase23_second.md --tra
 - `analysis.py:analyze_dataframe()`：可独立测试的确定性分析，不修改输入 DataFrame。
 - `analysis.py:analyze_csv()`：读取同一份 CSV 字节并计算 SHA256，再调用分析函数。
 - `analysis.py:evidence_markdown()`：只格式化数值证据表，既不解释结论，也不生成完整报告。
+- `report.py:assemble_report()`：用本次可信证据替换草稿中的证据区域，保留 Main 在区域外编写的解释与组织。
 - `tools/experiment.py:make_analyze_experiment(root)`：以闭包绑定工作区，避免依赖 cwd。
 - `agent.py:load_model()` / `build_agent()`：加载配置、创建模型、Backend 和真实 Agent。
 - `subagent.py:make_analyst()` / `verify_analysis()` / `RunEvidence`：隔离分析子图、核对输出、保存运行级可信证据。
@@ -388,7 +401,7 @@ Tool 输入为 JSON 对象，两个字段都必填：
 
 所有统计基于每个种子**最后一个 FE 的 fitness**。标准差使用 `ddof=1`；`Best=min`、`Worst=max`；平均收敛曲线按相同 FE 跨 seed 平均。均值并列时在 `lowest_mean_algorithms` 中保留所有并列算法；排名列表以名称打破排序歧义，不代表并列算法有优劣。未做 Wilcoxon/Friedman 等检验。
 
-校验失败时抛出 `ToolException`，LangChain 将其转为错误 ToolMessage；不会把错误字符串当统计结果。统计 JSON 保留 Python 浮点精度；`evidence_markdown` 使用 12 位有效数字，包含数据路径、SHA256、最终统计表和完整平均收敛表。Main 可将三个完整证据块放在不同章节，并独立生成解释段落。
+校验失败时抛出 `ToolException`，LangChain 将其转为错误 ToolMessage；不会把错误字符串当统计结果。统计 JSON 保留 Python 浮点精度；`evidence_markdown` 使用 12 位有效数字，包含数据路径、SHA256、最终统计表和完整平均收敛表。Python 将完整证据填入 Main 指定的证据区域，解释段落由 Main 在区域之外编写。原验证器仍兼容三块证据分章节存放的已有报告格式。
 
 ## 离线测试
 
@@ -484,6 +497,8 @@ PY
 
 2026-11-21 Main 遗漏写报告修复：实际运行同一离线命令，**141 passed in 4.12s**。新增 11 项用例覆盖无历史/有历史时提醒后真实写入并保存 Memory、持续遗漏只提醒一次且保留旧库、截断/过滤/非法工具调用不重试、真实写入失败不重试、证据错误/调用顺序错误不修复、提醒仍受原步数上限约束、CLI 最终失败不显示已核验或已保存。全部使用 Fake Model；没有执行本次远程重测。用户提供的真实日志证明第一次报告/Memory 保存及第二次历史检索成功，但第二次完整报告流程尚未通过；该失败日志不包含 Main 最终消息，不能证明是历史上下文导致了遗漏。
 
+2026-11-21 SHA256 截断修复：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**148 passed in 4.34s**。新增 7 项离线用例覆盖模型草稿内截断 SHA256 的确定性替换、已注入历史时仍使用当前 CSV 证据、空证据区域生成完整报告、缺失/重复/倒序标记、无效草稿不得触达文件工具或写 Memory。验证实际工具参数与磁盘内容完全相同。原有错误证据测试改为注入组装故障后验证拒绝，未删除来源/统计完整性检查；截断草稿直接交给原验证器仍然失败。Skill、隔离、禁止覆盖和 Memory 回归继续通过。本次没有执行真实模型重测；已有失败报告不会被修补或覆盖，重测请指定新文件名。
+
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
 版本依赖未升级：DeepAgents 0.7.40 与 LangChain 1.5.2，原有 Skills/task 兼容点继续由回归测试覆盖。支持源码工作区运行；wheel 不单独打包 skills/data 资源。
@@ -507,6 +522,7 @@ research-engineer-agent/
 │   ├── subagent.py
 │   ├── skill_backend.py
 │   ├── memory.py
+│   ├── report.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
@@ -526,6 +542,7 @@ research-engineer-agent/
     ├── test_output_wording.py
     ├── test_submission.py
     ├── test_report_completion.py
+    ├── test_report.py
     ├── test_memory.py
     └── memory_worker.py
 ```

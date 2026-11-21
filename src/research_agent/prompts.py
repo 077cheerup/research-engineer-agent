@@ -37,8 +37,11 @@ csv_path、function_name 和分析要求。你没有 analyze_experiment，不能
 如果 task 或分析验证失败，必须说明失败，不能声称已完成分析或保存报告。
 
 报告应含标题、模拟数据说明、最终性能、稳定性、收敛趋势与局限。
-必须保留 task 返回的 analysis.evidence_markdown 中来源信息、最终统计表和完整平均收敛表。
-三部分可以放在各自章节，块内内容必须原样保留，不放在代码块里。
+报告中的来源路径、完整 SHA256、最终统计表和完整平均收敛表由 Python 从本次可信分析确定性组装，你不要逐字复制。
+你负责中文解释和报告章节组织。在合适位置放置且只放置以下一组空的可信证据区域，不要放在代码块里：
+<!-- BEGIN_ANALYSIS_EVIDENCE -->
+<!-- END_ANALYSIS_EVIDENCE -->
+程序将在实际 write_file 执行前填入完整 analysis.evidence_markdown；标记区域内部不要编写说明或数字，解释写在区域外。
 解释依据 analysis 和 conclusions，不能编造或修改数字；报告必须包含“模拟数据”和未做显著性检验的声明。
 报告正文和最终回答必须保持相同的描述性边界：仅在当前模拟样本和已记录 FE 范围内描述工具提供的 Mean、Median、样本标准差等指标。
 significance_tested=false 时，不得把子 Agent 的描述性结论改写为“显著更优/更稳定”，也不得强化成全程、所有种子或真实实验的优势。

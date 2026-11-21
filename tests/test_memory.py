@@ -56,7 +56,10 @@ def test_success_saves_facts_after_acceptance(workspace):
 
 
 @pytest.mark.parametrize("mode", ["child_no_tool", "skip_skill", "bad_numbers", "no_write"])
-def test_failed_acceptance_never_writes_memory(workspace, mode):
+def test_failed_acceptance_never_writes_memory(workspace, mode, monkeypatch):
+    if mode == "bad_numbers":
+        # Fault after drafting: wrong evidence must still fail verification.
+        monkeypatch.setattr("research_agent.agent.assemble_report", lambda draft, analysis: draft)
     model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     with pytest.raises(AgentRunError):
         run_agent(root=workspace, model=model, output="reports/result.md")

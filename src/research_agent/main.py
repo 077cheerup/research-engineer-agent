@@ -17,6 +17,7 @@ from research_agent.agent import ConfigurationError, build_agent, report_path
 from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
 from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, history_summary
+from research_agent.report import ReportAssemblyError
 
 
 class AgentRunError(RuntimeError):
@@ -205,6 +206,8 @@ def run_agent(
         raise AgentRunError("模型未实现 Tool Calling/bind_tools；请选择支持工具调用的服务") from exc
     except AnalysisVerificationError as exc:
         raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
+    except ReportAssemblyError as exc:
+        raise AgentRunError(f"报告可信证据组装失败：{exc}；未确认保存，未写入 Memory") from exc
     try:
         verified = verify_run(messages, root=workspace, csv=csv, function=function, destination=destination, run_evidence=run_evidence)
     except AnalysisVerificationError as exc:

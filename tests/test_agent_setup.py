@@ -17,6 +17,7 @@ from research_agent.agent import ConfigurationError, ReportFilesystemBackend, bu
 from research_agent.main import AgentRunError, main, run_agent
 from research_agent.subagent import AnalysisVerificationError, RunEvidence, verify_analysis
 from research_agent.tools.experiment import make_analyze_experiment
+from research_agent.report import EVIDENCE_START, EVIDENCE_END
 
 
 class ScriptedResearchModel(BaseChatModel):
@@ -138,9 +139,12 @@ class ScriptedResearchModel(BaseChatModel):
             missing_blocks = {"missing_source": 0, "missing_final": 1, "missing_curve": 2}
             if self.mode in missing_blocks:
                 table = "\n\n".join(block for index, block in enumerate(table.split("\n\n")) if index != missing_blocks[self.mode])
+            if self.mode == "normal":
+                table = ""  # Main supplies organization/prose, not copied evidence.
             return self.call("write_file", {
                 "file_path": f"{self.workspace}/reports/result.md" if self.mode == "host_path" else "/reports/result.md",
-                "content": "# 离线 Fake Model 流程验证\n\n模拟数据，非正式 CEC2013；无显著性检验。\n\n" + table,
+                "content": "# 离线 Fake Model 流程验证\n\n模拟数据，非正式 CEC2013；无显著性检验。\n\n"
+                           + EVIDENCE_START + "\n\n" + table + "\n\n" + EVIDENCE_END,
             }, "write-1")
         return AIMessage(content=f"模拟数据摘要。报告已保存到 reports/result.md，绝对路径：{self.workspace}/reports/result.md")
 
@@ -197,7 +201,11 @@ def test_real_graph_registers_and_executes_tools_offline(workspace, mode):
     ("bad_numbers", "数值证据"), ("loop", "步数上限"), ("parallel_write", "write_file"),
     ("missing_source", "来源信息"), ("missing_final", "最终统计表"), ("missing_curve", "平均收敛表"),
 ])
-def test_incomplete_runs_never_pass(workspace, mode, message):
+def test_incomplete_runs_never_pass(workspace, mode, message, monkeypatch):
+    if mode in {"bad_numbers", "missing_source", "missing_final", "missing_curve"}:
+        # Inject an assembly fault so bad evidence reaches the real writer.
+        # The verifier must remain strict even if assembly is broken.
+        monkeypatch.setattr("research_agent.agent.assemble_report", lambda draft, analysis: draft)
     model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     with pytest.raises(AgentRunError, match=message):
         run_agent(root=workspace, output="reports/result.md", model=model, max_steps=16)
