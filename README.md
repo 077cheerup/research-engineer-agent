@@ -4,6 +4,8 @@
 
 本项目是 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3。基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验和 Skill 专业指导；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
 
+在此基础上增量启用 Main 的最小 Planning：官方 `TodoListMiddleware` 提供 `write_todos`，用于当前运行内的任务清单与状态跟踪。实验分析、Analysis Subagent 的 Skill/工具权限、Memory 和报告验收逻辑保持原样。
+
 ## 安装、配置与运行
 
 需要 Python 3.11+ 和 uv。依赖和具体版本固定在 `uv.lock`；`.python-version` 指定 3.11。
@@ -90,6 +92,7 @@ uv run python scripts/generate_sample.py
 ```text
 用户 -> Python 按函数/算法检索并验证 Memory -> 有长度限制的历史事实参考
       -> Main（create_deep_agent）
+          -> write_todos：创建清单，并根据实际工具结果更新状态
           -> task(subagent_type="experiment-analyst", description="CSV + Function")
              -> 隔离的 Analysis Subagent（create_agent）
                 -> SkillsMiddleware 发现名称/描述/路径
@@ -106,6 +109,7 @@ CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Mem
 | 权限 | Main Agent | experiment-analyst |
 | --- | --- | --- |
 | `task` | 仅可委派 experiment-analyst | 无 |
+| `write_todos` | 官方 TodoListMiddleware，仅本轮计划状态 | 不注册 |
 | `analyze_experiment` | **不注册** | 保留，只读 data/ CSV |
 | `submit_analysis` | **不注册** | 提交来源引用和结论，无文件或 Memory 权限 |
 | `write_file` | 内置 Tool，仅新建 reports/*.md | **不注册** |
@@ -129,6 +133,7 @@ agent = create_deep_agent(
     backend=backend,
     system_prompt=SYSTEM_PROMPT,
     middleware=[
+        TodoListMiddleware(),
         completion,
         SubAgentMiddleware(backend=backend, subagents=[analyst]),
         FilesystemMiddleware(backend=backend, tools=["read_file", "write_file"]),
@@ -144,7 +149,47 @@ agent = create_deep_agent(
 - 内置 `task` 支持 CompiledSubAgent 的 `structured_response`：返回对象被序列化为一个 task ToolMessage，而非复制子 Agent 全部消息。当前源码还通过 `config.metadata.lc_subagent_tool_call_id` 传递真实父调用 ID，记录器据此绑定证据。
 - `FilesystemBackend.write()` 默认覆盖文件，因此继续使用原来的 `open('x')` 排他新建。`FilesystemMiddleware` 要求保留 `read_file`，Backend 仍拒绝所有通用读取。写入安全策略没有放宽。
 
-沿用 Phase 2.2 的专业 Skill；本阶段只增加程序管理的 JSON Memory，未新增子 Agent、MemoryMiddleware、Planning、HITL、MCP 或自定义 Summarization。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
+Phase 2.3 原先只增加程序管理的 JSON Memory；本次后续增量增加 Main 的官方 TodoListMiddleware。没有新增子 Agent、MemoryMiddleware、HITL、MCP 或自定义 Summarization。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
+
+## Main 的最小 Planning
+
+锁定版本为 DeepAgents 0.7.40 / LangChain 1.5.2。检查安装源码后，`write_todos` 不是每种模型 profile 都默认提供的工具，因此 `agent.py:build_agent()` 显式配置官方 `TodoListMiddleware()`。DeepAgents 按同名 Middleware 替换已有实例；即使模型 profile 已包含它，也不会再次注册一个计划工具。未新增自定义规划工具或规划 Agent，Analysis Subagent 的工具集合不变。
+
+多步骤研究任务先创建 2–4 项清单，例如“取得可信分析结果”“组织并保存报告”“整理摘要和实际路径”。输入格式：
+
+```json
+{
+  "todos": [
+    {"content": "取得可信分析结果", "status": "in_progress"},
+    {"content": "组织并保存报告", "status": "pending"},
+    {"content": "整理摘要和实际路径", "status": "pending"}
+  ]
+}
+```
+
+每次调用替换完整清单；状态仅支持 `pending`、`in_progress`、`completed`。Main 收到成功 task 结果后完成分析项、开始报告项；实际 write_file 成功后才完成保存项。可在开始写报告的同一轮更新“进行中”状态，但不能预先把保存标成完成。同一轮不并行调用多个 write_todos。失败时保留 pending/in_progress 并在任务内容或最终回答中说明原因，不伪造 completed。
+
+计划保存在当前图的 `todos` 状态中，不写入 Research Memory、不跨进程恢复，也不新增 Checkpointer。Python 的最终验收与 Memory 保存发生在 Main 回答之后，不列为模型已完成的任务。清单是模型的进度记录，**不是可信执行证明**；没有新增 Planning 验收条件或措辞判断，已有任务即使不创建清单也仍按原 `verify_run()` 验收。真实模型是否遵循计划要求须检查 Trace，不能靠最终回答中自称有计划判定。
+
+```bash
+uv run python -m research_agent.main \
+  --output reports/F1_planning.md --max-steps 40 --trace
+```
+
+`--max-steps` 参数及默认值 24 保留；计划调用也消耗正常图步数，复杂任务可显式使用上述 40 步预算。Trace 示例（省略原有统计和 Skill 事件）：
+
+```text
+tool_call write_todos id=plan-start
+tool_result write_todos id=plan-start status=success
+plan_created {"tool_call_id":"plan-start","todos":[...pending/in_progress...]}
+tool_call task id=...
+tool_result task id=... status=success
+plan_updated {"tool_call_id":"...","todos":[...分析 completed，报告 in_progress...]}
+tool_result write_file id=... status=success
+plan_updated {"tool_call_id":"...","todos":[...completed...]}
+```
+
+`plan_created` / `plan_updated` 只在实际 write_todos 成功 ToolMessage 后产生，内容取自工具更新后的真实 `state.todos`；不会解析模型自述或打印整段模型配置。失败调用显示 `tool_error write_todos`，不算创建/更新成功。完成清单后 Main 仍须另行返回分析摘要与实际报告路径，随后由原程序核验文件及证据并保存 Memory。
 
 接口参考：[create_deep_agent](https://reference.langchain.com/python/deepagents/graph/create_deep_agent)、[SubAgentMiddleware](https://reference.langchain.com/python/deepagents/middleware/subagents/SubAgentMiddleware)。具体行为以 `uv.lock` 和安装源码为准。
 
@@ -491,13 +536,15 @@ PY
 
 ## Phase 2.3 范围与限制
 
-只增加本地 JSON Memory 和 Python 编排，未增加子 Agent、Memory 写入 Tool、MemoryMiddleware、Checkpointer、向量数据库、RAG、MCP、Planning、HITL 或前端。后续输出协议修复仅给 Analysis Subagent 增加 `submit_analysis`，替换手写 JSON；Main 工具列表、Skill 白名单及统计公式不变。
+Phase 2.3 原增量只增加本地 JSON Memory 和 Python 编排；后续输出协议修复给 Analysis Subagent 增加 `submit_analysis` 并确定性组装报告证据。本次 Planning 仅给 Main 增加官方 `write_todos`，不新增子 Agent、Memory 写入 Tool、MemoryMiddleware、Checkpointer、向量数据库、RAG、MCP、HITL 或前端。Skill 白名单、统计公式、报告验证与 Memory 写入机制保持原样。
 
 2026-11-21 子 Agent 提交协议修复：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**130 passed in 3.83s**。新增/调整用例覆盖真实提交工具执行、提交附带说明文字、提交后直接结束子图、仅文本 JSON/摘要被拒绝、提前提交不能替代分析、缺失结论拒绝、CLI 失败不显示已核验且不保存 Memory。原有 Skill、数值篡改、权限、跨进程 Memory 与措辞不拦截测试继续通过。本次没有调用真实模型，不能将这些离线结果视为远程集成通过；可用 `uv run python scripts/manual_integration.py` 单独验证真实服务。
 
 2026-11-21 Main 遗漏写报告修复：实际运行同一离线命令，**141 passed in 4.12s**。新增 11 项用例覆盖无历史/有历史时提醒后真实写入并保存 Memory、持续遗漏只提醒一次且保留旧库、截断/过滤/非法工具调用不重试、真实写入失败不重试、证据错误/调用顺序错误不修复、提醒仍受原步数上限约束、CLI 最终失败不显示已核验或已保存。全部使用 Fake Model；没有执行本次远程重测。用户提供的真实日志证明第一次报告/Memory 保存及第二次历史检索成功，但第二次完整报告流程尚未通过；该失败日志不包含 Main 最终消息，不能证明是历史上下文导致了遗漏。
 
 2026-11-21 SHA256 截断修复：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**148 passed in 4.34s**。新增 7 项离线用例覆盖模型草稿内截断 SHA256 的确定性替换、已注入历史时仍使用当前 CSV 证据、空证据区域生成完整报告、缺失/重复/倒序标记、无效草稿不得触达文件工具或写 Memory。验证实际工具参数与磁盘内容完全相同。原有错误证据测试改为注入组装故障后验证拒绝，未删除来源/统计完整性检查；截断草稿直接交给原验证器仍然失败。Skill、隔离、禁止覆盖和 Memory 回归继续通过。本次没有执行真实模型重测；已有失败报告不会被修补或覆盖，重测请指定新文件名。
+
+Main 最小 Planning 增量：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**154 passed in 4.82s**。保留原 148 项测试，新增 6 项离线用例：无历史/有历史时真实计划创建和更新、官方工具实际更新图中 todos、报告写入失败时保持未完成且不写 Memory、清单全 completed 不能替代真实分析/报告、非法状态不会产生成功计划事件。测试驱动真实 DeepAgents 图和官方 Todo 工具，但模型是 Fake，没有调用付费 API，也没有执行本次 Planning 的远程模型验收。
 
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
@@ -543,6 +590,7 @@ research-engineer-agent/
     ├── test_submission.py
     ├── test_report_completion.py
     ├── test_report.py
+    ├── test_planning.py
     ├── test_memory.py
     └── memory_worker.py
 ```

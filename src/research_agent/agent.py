@@ -14,7 +14,7 @@ from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.subagents import SubAgentMiddleware
 from dotenv import dotenv_values
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
+from langchain.agents.middleware import AgentMiddleware, AgentState, TodoListMiddleware, hook_config
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
@@ -190,7 +190,7 @@ def build_agent(
         system_prompt=SYSTEM_PROMPT,
         # Public same-name replacement removes the default general-purpose
         # agent from the final task tool without a global profile registration.
-        middleware=[ReportCompletionMiddleware(run_evidence, relative_output), SubAgentMiddleware(
+        middleware=[TodoListMiddleware(), ReportCompletionMiddleware(run_evidence, relative_output), SubAgentMiddleware(
             backend=backend, subagents=[analyst],
             task_description="委派实验分析任务。description 中必须包含 csv_path 和 function_name。只可使用以下子 Agent：\n{available_agents}\n返回经过程序核验的完整统计 JSON 和中文结论。",
         ), FilesystemMiddleware(

@@ -139,7 +139,7 @@ def run_agent(
     request = (
         f"分析算法 A 和算法 B 在 CEC2013 {function} 上的模拟实验结果，比较最终性能、稳定性和收敛趋势，"
         f"生成中文 Markdown 报告。CSV 参数：{json.dumps(csv.relative_to(workspace).as_posix())}；"
-        f"function_name 参数：{json.dumps(function)}。先用 task 委派 experiment-analyst，"
+        f"function_name 参数：{json.dumps(function)}。本多步骤任务先用 write_todos 创建计划，再用 task 委派 experiment-analyst，"
         "description 中须包含以上两个精确参数。取得完整可信分析结果后再写入 "
         f"/{destination.relative_to(workspace).as_posix()}。write_file.file_path 必须精确使用 "
         f"{json.dumps('/' + destination.relative_to(workspace).as_posix())}，无需先读取目标。"
@@ -148,6 +148,7 @@ def run_agent(
     )
     seen = set()
     call_names = {}
+    plan_created = False
     messages = []
     reminder_seen = False
     inputs = []
@@ -185,7 +186,11 @@ def run_agent(
                     elif isinstance(message, ToolMessage):
                         name = message.name or call_names.get(message.tool_call_id, "unknown")
                         trace(f"tool_result {name} id={message.tool_call_id} status={message.status}")
-                        if message.status == "error" and name in {"read_file", "write_file"}:
+                        if name == "write_todos" and message.status == "success" and isinstance(state.get("todos"), list):
+                            event = "plan_updated" if plan_created else "plan_created"
+                            trace(event + " " + json.dumps({"tool_call_id": message.tool_call_id, "todos": state["todos"]}, ensure_ascii=False))
+                            plan_created = True
+                        if message.status == "error" and name in {"read_file", "write_file", "write_todos"}:
                             trace(f"tool_error {name}: {message.text}")
                         if name == "task" and message.tool_call_id in run_evidence.completed:
                             trace(f"subagent_analysis_verified subagent={ANALYST_NAME} task_id={message.tool_call_id}")
@@ -227,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--function", default="F1")
     parser.add_argument("--output", default="reports/F1_comparison.md")
     parser.add_argument("--max-steps", type=int, default=24)
-    parser.add_argument("--trace", action="store_true", help="显示工具调用及统计结果，不输出模型配置或密钥")
+    parser.add_argument("--trace", action="store_true", help="显示工具调用、计划创建/更新及统计结果，不输出模型配置或密钥")
     args = parser.parse_args(argv)
     try:
         result = run_agent(
