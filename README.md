@@ -2,7 +2,7 @@
 
 基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 通过 `SkillsMiddleware` 发现专业规范、按需读取白名单 Skill，再调用确定性分析 Tool；验证真实 Skill 加载和工具执行后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
 
-本项目是 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3。基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验、Skill 和语言边界；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
+本项目是 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3。基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验和 Skill 专业指导；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
 
 ## 安装、配置与运行
 
@@ -99,7 +99,7 @@ uv run python scripts/generate_sample.py
              -> 程序核对真实工具记录、证据及参数
              -> task ToolMessage：完整可信 analysis + conclusions + skill 加载凭据
           -> 内置 write_file -> ReportFilesystemBackend -> reports/*.md
-CLI -> 两层验证及统计语言核验 -> 保存可信 Research Memory -> 摘要和真实路径
+CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Memory -> 摘要和真实路径
 ```
 
 | 权限 | Main Agent | experiment-analyst |
@@ -225,23 +225,13 @@ child = create_agent(
 
 Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。本次只增加下述有限语言检查，不增加通用语义判定器或新的统计公式，仍需人工审阅解释。
 
-## 统计语言核验（Phase 2.2 修复）
+## 解释语言与验收边界
 
-真实运行已证明 Skill 成功读取不等于输出语义正确。`reports/F1_phase22.md` 中出现了不受当前模拟样本支持的“全程领先”等概括；用户提供的 Main 最终回答还有“显著更优”与“未进行检验”的矛盾。原验证只检查统计证据和执行链，没有审查这些文字。历史 task conclusions 未保存，原 trace 也不包含它们，因此不能断言措辞最初来自子模型还是 Main 的改写。
+按 2026-11-21 的要求，已经删除正则统计语言判断及其在子 Agent、Markdown 报告和 Main 最终回答上的拦截。不会因“显著低于”“全程领先”等自然语言措辞而中断运行，也没有自动重试或替代的语义判定器。
 
-本次只增加 `statistical_language.py:verify_statistical_language()`，复用于三个输出位置：
+Prompt 与 `experiment-analysis` Skill 继续指导模型区分描述性比较和统计显著性，优先描述当前模拟样本与已记录采样点；这些是生成指导，不是验收规则。`analysis_conclusions` trace 仍展示子结论，便于人工审阅。
 
-- 子 Agent 的三个 `conclusions` 字段，在发布可信 task 结果前检查；
-- `verify_run()` 检查实际保存的 Markdown 正文；
-- `verify_run()` 检查实际 Main 最终回答，全部检查通过之后 CLI 才打印“已核验报告”。
-
-显著性状态取自可信 Python 工具的 `analysis.comparison.significance_tested`，不以模型自己的声明为准。未检验时拒绝“显著更优/更稳定”“在统计意义上显著低于”“存在统计学显著差异”等正向统计断言。按 2026-11-21 的使用偏好，单纯“显著低于／显著更低”作为程度描述暂不拦截；它不表示已证明统计显著性。另检查采样点被强化为“全程/每个阶段领先”、未经计算的速度优势，以及未限定样本的种子/稳定性概括或真实 CEC2013 优势。
-
-按标点与转折划分局部子句，允许“不能据此宣称显著更优”“较小 Std 不等于显著更稳定”等否定；“未做检验，但 B 显著更优”中的后半句仍会失败。不是简单禁止“显著”一词，也不把一个段落开头的免责声明当作后文所有断言的豁免。推荐使用“当前模拟样本中均值较低”“样本标准差较小”“已记录 FE 采样点的均值较低”等具体表述。
-
-Main Prompt 要求报告与最终回答保持同一描述性边界；Analyst Prompt 与 Skill 补充“优先使用当前样本均值较低，程度描述不等于统计显著”的说明。渐进加载、Backend 和统计公式不改。trace 新增 `analysis_conclusions`，显示程序已经接收的子结论，便于下一次对照 Main 的报告与最终回答，不新增持久日志系统。
-
-**范围与局限**：这是针对当前项目常见中文措辞的有限规则，不是完整语法或统计推理。复杂引用、跨句限定、双重否定、同义改写可能漏检或误报；它不验证任意派生数字，也不能证明每句结论正确。检查在验收阶段运行；文件若已写入，会作为未验收产物保留，不自动删除或覆盖。原有精确数值证据核验继续执行。
+“已核验报告”只表示实际工具执行、Skill 加载、来源、数值证据、文件内容和路径符合技术约定，**不保证整篇研究解释正确**。数据字段 `significance_tested=false` 仍必须与真实工具一致；Memory 的可信统计与模型解释继续分开保存。
 
 ## Research Memory（Phase 2.3）
 
@@ -249,7 +239,7 @@ Main Prompt 要求报告与最终回答保持同一描述性边界；Analyst Pro
 
 ### 写入时机与字段来源
 
-`run_agent()` 先完成原有 `verify_run()`：真实 task、分析执行、Skill 全文读取、写入、精确数值证据、报告和最终回答的统计语言均通过后，才调用 Python 的 `ResearchMemoryStore.save_verified()`。模型没有 Memory 写入 Tool，也不生成可信统计字段。写入失败会明确报告“报告验收已通过，但 Memory 保存失败”，退出码为 1，不打印记忆保存成功。
+`run_agent()` 先完成原有 `verify_run()`：真实 task、分析执行、Skill 全文读取、写入、精确数值证据、文件内容与最终路径均通过后，才调用 Python 的 `ResearchMemoryStore.save_verified()`。模型没有 Memory 写入 Tool，也不生成可信统计字段。写入失败会明确报告“报告验收已通过，但 Memory 保存失败”，退出码为 1，不打印记忆保存成功。
 
 文件结构（省略实际数值）：
 
@@ -311,7 +301,7 @@ memory_saved {"experiment_id": "...", "created": false, "path": ".../memory/rese
 
 读取和保存时验证版本、结构、全文件 checksum、experiment_id，并使用保留的原 CSV 独立重算 `facts`、核对每个报告 SHA256。即使有人重算了 JSON checksum，伪造 Mean 仍会被拒绝。损坏、字段类型错误、来源丢失或内容变化会明确失败，不静默忽略或自动清空；请检查文件并恢复正确的来源/报告。
 
-**应为不同实验保留独立 CSV 和报告，不覆盖历史来源。** checksum 不是数字签名，不能证明恶意用户同时改写全部文件后的真实性；它不提供身份认证。模型解释始终不是可信统计事实，统计语言规则也不保证所有语义正确。JSON 存储用于本地可信工作区，不是生产审计服务。
+**应为不同实验保留独立 CSV 和报告，不覆盖历史来源。** checksum 不是数字签名，不能证明恶意用户同时改写全部文件后的真实性；它不提供身份认证。模型解释始终不是可信统计事实，自然语言统计结论由人工审阅。JSON 存储用于本地可信工作区，不是生产审计服务。
 
 ### 跨进程验收演示（完全离线）
 
@@ -469,6 +459,7 @@ PY
 | 可信性与失败 | 真实分析字段一致；伪造统计/重算 checksum 仍拒绝；无效 JSON/类型/来源或报告变化明确失败；写入失败不报成功，原子替换失败保留旧库 |
 | 跨进程演示 | **1 passed**；三个不同 PID，F1 第二次命中，F2 对照未注入 |
 | 2026-11-21 程度措辞调整 | **158 项离线测试通过**；单纯“显著低于/更低”放行，显式统计显著性断言仍拒绝；覆盖子结论、报告、最终回答与验收后 Memory 保存 |
+| 2026-11-21 移除语言拦截 | **124 项离线测试通过**；删除正则规则及对应拒绝测试，新增子结论/报告/最终回答不因措辞阻断的回归，保留数值与 Memory 验证 |
 | Phase 2.3 真实模型集成 | **本次未执行**；保留独立手动入口，不与 Fake Model 结果混同 |
 
 整个 pytest 套件禁止 HTTP 和 socket；跨进程 worker 也显式禁止网络。Fake Model 测试证明持久化、调用协议和数据边界，不证明真实模型一定正确理解历史或专业规范。普通环境运行 `uv run pytest -q`；本机使用可写缓存 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`。
@@ -477,7 +468,7 @@ PY
 
 只增加本地 JSON Memory 和 Python 编排，未增加子 Agent、Memory 写入 Tool、MemoryMiddleware、Checkpointer、向量数据库、RAG、MCP、Planning、HITL 或前端。Main 和 Analysis Subagent 的工具列表、Skill 白名单及统计公式不变。
 
-仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。有限统计语言检查与 SHA256 完整性校验不等于通用语义正确性或密码学认证。真实模型如何使用相关历史仍需手动验证。
+仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
 版本依赖未升级：DeepAgents 0.7.40 与 LangChain 1.5.2，原有 Skills/task 兼容点继续由回归测试覆盖。支持源码工作区运行；wheel 不单独打包 skills/data 资源。
 
@@ -499,7 +490,6 @@ research-engineer-agent/
 │   ├── analysis.py
 │   ├── subagent.py
 │   ├── skill_backend.py
-│   ├── statistical_language.py
 │   ├── memory.py
 │   └── tools/
 │       ├── __init__.py
@@ -517,7 +507,7 @@ research-engineer-agent/
     ├── test_experiment_tool.py
     ├── test_agent_setup.py
     ├── test_skills.py
-    ├── test_statistical_language.py
+    ├── test_output_wording.py
     ├── test_memory.py
     └── memory_worker.py
 ```

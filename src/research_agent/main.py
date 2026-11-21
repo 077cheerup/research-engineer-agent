@@ -16,7 +16,6 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 from research_agent.agent import ConfigurationError, build_agent, report_path
 from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
-from research_agent.statistical_language import StatisticalLanguageError, verify_statistical_language
 from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, history_summary
 
 
@@ -48,8 +47,8 @@ def verify_run(
 ) -> dict[str, Any]:
     """Require real ToolMessages, correct ordering, evidence, and disk content.
 
-    Exact evidence and selected unsupported language are checked. General
-    natural-language correctness still requires human review.
+    Exact evidence is checked. Natural-language correctness requires human
+    review and does not block this technical acceptance check.
     """
     calls = {}
     payload = None
@@ -98,13 +97,6 @@ def verify_run(
     relative = destination.relative_to(root).as_posix()
     if relative not in final.text or str(destination) not in final.text:
         raise AgentRunError("Agent 最终回答未包含实际报告路径")
-    try:
-        for context, text in (("Markdown 报告：", saved), ("Main 最终回答：", final.text)):
-            verify_statistical_language(
-                text, significance_tested=evidence["comparison"]["significance_tested"], context=context,
-            )
-    except StatisticalLanguageError as exc:
-        raise AgentRunError(str(exc)) from exc
     return {"summary": final.text, "report_path": str(destination), "analysis": evidence,
             "conclusions": report_payload["conclusions"], "skill": report_payload["skill"]}
 

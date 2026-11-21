@@ -16,7 +16,6 @@ from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, hist
 from research_agent.tools.experiment import make_analyze_experiment
 from memory_worker import MemoryFakeModel
 from test_agent_setup import ScriptedResearchModel, workspace
-from test_statistical_language import LanguageRegressionModel
 
 
 def run(workspace, output="reports/result.md", csv="data/sample_experiments.csv", function="F1", **kwargs):
@@ -56,14 +55,9 @@ def test_success_saves_facts_after_acceptance(workspace):
     assert not histories(model)  # Empty store does not create a fake history message.
 
 
-@pytest.mark.parametrize("mode,kind", [
-    ("child_no_tool", "normal"), ("skip_skill", "normal"),
-    ("bad_numbers", "normal"), ("no_write", "normal"),
-    ("unsafe_report", "language"), ("unsafe_final", "language"),
-])
-def test_failed_acceptance_never_writes_memory(workspace, mode, kind):
-    model_class = LanguageRegressionModel if kind == "language" else ScriptedResearchModel
-    model = model_class(workspace=str(workspace), mode=mode)
+@pytest.mark.parametrize("mode", ["child_no_tool", "skip_skill", "bad_numbers", "no_write"])
+def test_failed_acceptance_never_writes_memory(workspace, mode):
+    model = ScriptedResearchModel(workspace=str(workspace), mode=mode)
     with pytest.raises(AgentRunError):
         run_agent(root=workspace, model=model, output="reports/result.md")
     assert not (workspace / "memory/research.json").exists()
