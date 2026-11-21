@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import NotRequired
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
@@ -13,15 +14,71 @@ from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.subagents import SubAgentMiddleware
 from dotenv import dotenv_values
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from research_agent.prompts import SYSTEM_PROMPT
 from research_agent.tools.experiment import project_root
-from research_agent.subagent import RunEvidence, make_analyst
+from research_agent.subagent import ANALYST_NAME, RunEvidence, make_analyst, verify_analysis
 
 
 class ConfigurationError(ValueError):
     """Missing model configuration; values and credentials are never logged."""
+
+
+class ReportState(AgentState):
+    report_reminder_sent: NotRequired[bool]
+
+
+class ReportCompletionMiddleware(AgentMiddleware):
+    """One in-graph reminder for an observed premature final answer.
+
+    Does not retry failed writes or validate wording. State is scoped to one
+    invocation and the normal graph recursion limit also bounds the reminder.
+    """
+
+    state_schema = ReportState
+
+    def __init__(self, evidence: RunEvidence, relative_output: str):
+        self.evidence = evidence
+        self.relative_output = relative_output
+
+    @hook_config(can_jump_to=["model"])
+    def after_model(self, state, runtime):
+        messages = state["messages"]
+        final = messages[-1]
+        if (state.get("report_reminder_sent") or not isinstance(final, AIMessage)
+                or final.tool_calls or final.invalid_tool_calls
+                or final.response_metadata.get("finish_reason") not in (None, "stop")):
+            return None
+        calls = {call["id"]: call for m in messages if isinstance(m, AIMessage) for call in m.tool_calls}
+        # A write attempt, even a failed or premature one, goes to the existing
+        # verifier. Never overwrite a file or mask a real write failure.
+        if any(call["name"] == "write_file" for call in calls.values()):
+            return None
+        for message in reversed(messages):
+            if not isinstance(message, ToolMessage) or message.status != "success":
+                continue
+            call = calls.get(message.tool_call_id, {})
+            if (call.get("name") != "task"
+                    or call["args"].get("subagent_type") != ANALYST_NAME):
+                continue
+            # Only trusted current-run results can trigger continuation.
+            verify_analysis(message.tool_call_id, message.text, self.evidence,
+                            csv_path=self.evidence.csv_path, function_name=self.evidence.function_name)
+            return {
+                "report_reminder_sent": True,
+                "messages": [HumanMessage(content=(
+                    "本次任务尚未完成：当前分析已核验，但你尚未调用 write_file。"
+                    "历史报告仅供参考，不能替代本次输出。请使用刚才 task 的可信 analysis 和 conclusions，"
+                    f"调用 write_file(file_path=\"/{self.relative_output}\", content=完整 Markdown 报告)，"
+                    "保留完整数值证据与模拟数据说明；无需重新分析。"
+                    "等待写入成功后再返回摘要、本次报告相对路径及主机绝对路径。"
+                ))],
+                "jump_to": "model",
+            }
+        return None
 
 
 def report_path(output: str, root: Path) -> Path:
@@ -90,6 +147,7 @@ def build_agent(
     root: Path | str | None = None, *, model: BaseChatModel | None = None,
     analyst_model: BaseChatModel | None = None, evidence: RunEvidence | None = None,
     max_steps: int = 24,
+    report_output: str | None = None,
 ):
     """Use the real create_deep_agent; injectable models enable offline tests."""
     workspace = Path(root).resolve() if root is not None else project_root()
@@ -100,6 +158,10 @@ def build_agent(
         workspace, analyst_model if analyst_model is not None else main_model,
         run_evidence, max_steps=max_steps,
     )
+    completion = []
+    if report_output is not None:
+        relative_output = report_path(report_output, workspace).relative_to(workspace).as_posix()
+        completion.append(ReportCompletionMiddleware(run_evidence, relative_output))
     return create_deep_agent(
         model=main_model,
         tools=[],
@@ -107,7 +169,7 @@ def build_agent(
         system_prompt=SYSTEM_PROMPT,
         # Public same-name replacement removes the default general-purpose
         # agent from the final task tool without a global profile registration.
-        middleware=[SubAgentMiddleware(
+        middleware=[*completion, SubAgentMiddleware(
             backend=backend, subagents=[analyst],
             task_description="委派实验分析任务。description 中必须包含 csv_path 和 function_name。只可使用以下子 Agent：\n{available_agents}\n返回经过程序核验的完整统计 JSON 和中文结论。",
         ), FilesystemMiddleware(

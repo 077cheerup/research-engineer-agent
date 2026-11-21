@@ -25,7 +25,7 @@ LLM_MODEL=your-tool-calling-model
 
 从项目根目录的 `.env` 加载，已有同名环境变量优先。不读取 shell 当前目录的 `.env`。`ChatOpenAI` 显式接收 `model`、`api_key`、`base_url`，使用 Chat Completions（`use_responses_api=False`），超时 60 秒，SDK 不自动重试。不主动启用 JSON mode、强制 tool_choice、并行工具调用或其他服务可能不支持的参数。
 
-`.env`、环境变体、生成报告、虚拟环境均被 Git 忽略。请勿把真实密钥写进 README、测试、命令参数、日志或 Git。`--trace` 只显示工具事件和统计数据，不输出模型配置或密钥。
+`.env`、环境变体、生成报告、虚拟环境均被 Git 忽略。请勿把真实密钥写进 README、测试、命令参数、日志或 Git。`--trace` 显示工具事件、统计数据、Memory 事件和 Main 结束回复诊断，不输出模型配置或密钥。
 
 ```bash
 uv run python -m research_agent.main \
@@ -120,12 +120,15 @@ CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Mem
 run_evidence = RunEvidence()  # run_agent 每次运行创建，并绑定期望 CSV / Function
 analyst = make_analyst(workspace, analyst_model, run_evidence, max_steps=24)
 backend = ReportFilesystemBackend(workspace)  # virtual_mode=True
+# CLI 指定本轮目标，使提前结束时可在同一图内提醒一次。
+completion = ReportCompletionMiddleware(run_evidence, relative_output)
 agent = create_deep_agent(
     model=main_model,
     tools=[],  # Main 不注册 analyze_experiment
     backend=backend,
     system_prompt=SYSTEM_PROMPT,
     middleware=[
+        completion,
         SubAgentMiddleware(backend=backend, subagents=[analyst]),
         FilesystemMiddleware(backend=backend, tools=["read_file", "write_file"]),
     ],
@@ -230,9 +233,11 @@ child = create_agent(
 
 Main 与每次子图运行分别限步；第一次分析验证失败会终止本次 CLI 验收。自然语言结论仍可能出错：例如“每个采样点较低”不能证明“差距持续扩大”。程序不做统计语言拦截，也不增加新的统计公式，解释仍需人工审阅。
 
+若 Main 已收到本次可信 task 结果，却在**从未尝试 write_file**时返回普通最终回答，`ReportCompletionMiddleware.after_model()` 用官方 `jump_to="model"` 在同一图内提醒一次完成本次新报告。提醒状态仅属于当前运行，不重置 `--max-steps`，不重新执行统计，也不在 Python 中替模型写报告。即使历史来自同一 CSV，也必须创建本次指定报告。忽略提醒仍会验收失败；已尝试写入、写入失败、证据错误、输出截断（length）、过滤（content_filter）或解析失败的工具调用不进入提醒路径。Skill/分析未通过时不能触发提醒，Memory 仍只在最终完整验收通过后保存。
+
 ## 解释语言与验收边界
 
-按 2026-11-21 的要求，已经删除正则统计语言判断及其在子 Agent、Markdown 报告和 Main 最终回答上的拦截。不会因“显著低于”“全程领先”等自然语言措辞而中断运行，也没有自动重试或替代的语义判定器。
+按 2026-11-21 的要求，已经删除正则统计语言判断及其在子 Agent、Markdown 报告和 Main 最终回答上的拦截。不会因“显著低于”“全程领先”等自然语言措辞而中断运行，也没有针对措辞的自动重试或替代语义判定器。
 
 Prompt 与 `experiment-analysis` Skill 继续指导模型区分描述性比较和统计显著性，优先描述当前模拟样本与已记录采样点；这些是生成指导，不是验收规则。`analysis_conclusions` trace 仍展示子结论，便于人工审阅。
 
@@ -419,6 +424,8 @@ tool_result write_file id=... status=success
 
 CLI 读取的是真实 Main AIMessage/ToolMessage。子 Agent 的内部分析 ToolMessage **不在 Main 的历史中**，`subagent_analysis_verified` 来自绑定 task ID 的程序记录，而非模型自述。证据比较仅忽略行尾空白和换行符差异，允许 Markdown 双空格换行；数值、哈希、行内内容仍须匹配。仅模型声称“已保存”不算成功。
 
+Main 未调用工具而结束时，trace 增加 `main_reply`：仅列出 `finish_reason`、回答字符数、前 240 字预览和无法解析的工具调用数量，不打印完整模型元数据、请求头或原始 API 错误体。触发上述补全时会出现 `report_completion_reminder attempt=1`；这只表示程序发出了提醒，后续仍须观察真实的 `tool_call write_file` / 成功结果及完整验收。该诊断能区分普通提前回复、长度截断和工具调用解析问题，不能仅据一次遗漏判定是 Memory 导致的。
+
 文件工具失败时，`--trace` 还会显示 `tool_error <name>: <具体原因>`；最终验收错误保留最后一次 `write_file` 错误，避免只显示泛化的“报告未保存”。不会输出写入报告的完整 content 参数或原始 API 错误体。
 
 如果看到 `read_file status=error`，这是 Backend 禁止通用读取的结果；创建新报告无需先读取目标。若 `write_file` 提示“虚拟路径”，检查其 `tool_path`：工具参数必须为 `/reports/F1_comparison.md`，不能传 `/Users/.../reports/F1_comparison.md`。主机绝对路径只用于最终回答。System Prompt、用户请求和工具描述都明确区分这两种路径；Backend 继续拒绝非法路径，不自动纠正或放宽限制。
@@ -475,6 +482,8 @@ PY
 
 2026-11-21 子 Agent 提交协议修复：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**130 passed in 3.83s**。新增/调整用例覆盖真实提交工具执行、提交附带说明文字、提交后直接结束子图、仅文本 JSON/摘要被拒绝、提前提交不能替代分析、缺失结论拒绝、CLI 失败不显示已核验且不保存 Memory。原有 Skill、数值篡改、权限、跨进程 Memory 与措辞不拦截测试继续通过。本次没有调用真实模型，不能将这些离线结果视为远程集成通过；可用 `uv run python scripts/manual_integration.py` 单独验证真实服务。
 
+2026-11-21 Main 遗漏写报告修复：实际运行同一离线命令，**141 passed in 4.12s**。新增 11 项用例覆盖无历史/有历史时提醒后真实写入并保存 Memory、持续遗漏只提醒一次且保留旧库、截断/过滤/非法工具调用不重试、真实写入失败不重试、证据错误/调用顺序错误不修复、提醒仍受原步数上限约束、CLI 最终失败不显示已核验或已保存。全部使用 Fake Model；没有执行本次远程重测。用户提供的真实日志证明第一次报告/Memory 保存及第二次历史检索成功，但第二次完整报告流程尚未通过；该失败日志不包含 Main 最终消息，不能证明是历史上下文导致了遗漏。
+
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
 版本依赖未升级：DeepAgents 0.7.40 与 LangChain 1.5.2，原有 Skills/task 兼容点继续由回归测试覆盖。支持源码工作区运行；wheel 不单独打包 skills/data 资源。
@@ -515,6 +524,8 @@ research-engineer-agent/
     ├── test_agent_setup.py
     ├── test_skills.py
     ├── test_output_wording.py
+    ├── test_submission.py
+    ├── test_report_completion.py
     ├── test_memory.py
     └── memory_worker.py
 ```

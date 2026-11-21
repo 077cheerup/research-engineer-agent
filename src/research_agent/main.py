@@ -81,6 +81,10 @@ def verify_run(
         raise AgentRunError("Main 未成功调用 task 委派 experiment-analyst 并取得可信分析结果")
     if written_content is None:
         detail = f"；工具错误：{last_write_error}" if last_write_error else ""
+        final = messages[-1] if messages else None
+        if not last_write_error and isinstance(final, AIMessage) and not final.tool_calls:
+            detail += (f"；Main 已结束回答（finish_reason={final.response_metadata.get('finish_reason', 'unknown')}，"
+                       f"回答字符数={len(final.text)}，无法解析的工具调用数={len(final.invalid_tool_calls)}）")
         raise AgentRunError("未观察到分析成功之后的 write_file 成功调用；报告未验证保存" + detail)
     evidence = report_payload["analysis"]
     if not destination.is_file():
@@ -129,7 +133,8 @@ def run_agent(
     if trace:
         trace(f"memory_retrieved matched={len(historical)} injected_chars={len(historical_text)}")
     run_evidence = RunEvidence(csv_path=csv.relative_to(workspace).as_posix(), function_name=function)
-    graph = build_agent(workspace, model=model, analyst_model=analyst_model, evidence=run_evidence, max_steps=max_steps)
+    graph = build_agent(workspace, model=model, analyst_model=analyst_model, evidence=run_evidence,
+                        max_steps=max_steps, report_output=destination.relative_to(workspace).as_posix())
     request = (
         f"分析算法 A 和算法 B 在 CEC2013 {function} 上的模拟实验结果，比较最终性能、稳定性和收敛趋势，"
         f"生成中文 Markdown 报告。CSV 参数：{json.dumps(csv.relative_to(workspace).as_posix())}；"
@@ -143,6 +148,7 @@ def run_agent(
     seen = set()
     call_names = {}
     messages = []
+    reminder_seen = False
     inputs = []
     if historical_text:
         inputs.append({"role": "user", "content": historical_text})
@@ -154,11 +160,20 @@ def run_agent(
         ):
             messages = state["messages"]
             if trace:
+                if state.get("report_reminder_sent") and not reminder_seen:
+                    trace("report_completion_reminder attempt=1")
+                    reminder_seen = True
                 for message in messages:
                     if message.id in seen:
                         continue
                     seen.add(message.id)
                     if isinstance(message, AIMessage):
+                        if not message.tool_calls:
+                            trace("main_reply " + json.dumps({
+                                "finish_reason": message.response_metadata.get("finish_reason", "unknown"),
+                                "text_chars": len(message.text), "preview": message.text[:240],
+                                "invalid_tool_calls": len(message.invalid_tool_calls),
+                            }, ensure_ascii=False))
                         for call in message.tool_calls:
                             call_names[call['id']] = call['name']
                             trace(f"tool_call {call['name']} id={call['id']}")
