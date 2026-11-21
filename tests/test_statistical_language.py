@@ -13,7 +13,8 @@ from test_agent_setup import ScriptedResearchModel, workspace
 @pytest.mark.parametrize("text", [
     "B 显著更优（更低）。",
     "B 在统计意义上显著优于 A。",
-    "B 的均值**显著低于** A。",
+    "B 的均值在统计意义上**显著低于** A。",
+    "B 的均值统计上显著更低。",
     "B 显著更稳定。",
     "A 和 B 存在统计学显著差异。",
     "B 统计上显著更加稳定。",
@@ -43,6 +44,9 @@ def test_reject_unsupported_positive_assertions(text):
     "在所有已观测的随机种子中，B 的最终值更低。",
     "不能由某 FE 的水平推断 B 的下降速度更快。",
     "图例颜色变化显著，便于辨认。",  # '显著' alone is not prohibited.
+    "B 的均值**显著低于** A。未进行统计显著性检验。",
+    "当前样本中 B 的均值显著更低。",
+    "描述性统计显示 B 的均值显著低于 A。",
 ])
 def test_allow_descriptions_and_correct_negative_statements(text):
     verify_statistical_language(text, significance_tested=False, context="测试：")
@@ -103,6 +107,35 @@ def test_descriptive_report_and_final_answer_still_pass(workspace):
     assert "未进行统计显著性检验" in saved
     assert result["analysis"]["comparison"]["significance_tested"] is False
     assert result["analysis"]["algorithms"]["A"]["mean"] == 20.738583304
+
+
+def test_plain_lower_wording_passes_all_outputs_and_saves_memory(workspace):
+    class LowerWordingModel(ScriptedResearchModel):
+        def child_reply(self, messages):
+            message = super().child_reply(messages)
+            if not message.tool_calls:
+                payload = json.loads(message.text)
+                payload["conclusions"]["final_performance"] = "当前模拟样本中 B 均值显著低于 A；未进行显著性检验。"
+                message.content = json.dumps(payload, ensure_ascii=False)
+            return message
+
+        def main_reply(self, messages):
+            message = super().main_reply(messages)
+            wording = "\n当前模拟样本中 B 均值显著低于 A；未进行显著性检验。"
+            if message.tool_calls:
+                for call in message.tool_calls:
+                    if call["name"] == "write_file":
+                        call["args"]["content"] += wording
+            else:
+                message.content += wording
+            return message
+
+    result = run_agent(root=workspace, model=LowerWordingModel(workspace=str(workspace)), output="reports/result.md")
+    assert "显著低于" in result["conclusions"]["final_performance"]
+    assert "显著低于" in result["summary"]
+    assert "显著低于" in (workspace / "reports/result.md").read_text()
+    assert result["memory"]["created"] is True
+    assert (workspace / "memory/research.json").is_file()
 
 
 @pytest.mark.parametrize("mode", ["unsafe_report", "unsafe_final"])

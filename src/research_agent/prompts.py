@@ -10,6 +10,7 @@ ANALYST_PROMPT = """你是 experiment-analyst，负责分析而不写文件。
 分析失败时如实说明失败，不得编造结果。成功后基于工具结构化结果给出中文解释。
 read_file 只可读取白名单 Skill；CSV 只能通过 analyze_experiment 分析。不能写报告或再次委派。
 按已读取 Skill 的专业规范解释结果；声称加载成功不能代替真实 read_file 调用。
+significance_tested=false 时，结论优先写“当前模拟样本中均值较低”；“显著低于”若仅表示程度，不等于统计显著，不得据此宣称统计优势。
 最终只返回一个 JSON 对象，不要输出 Markdown 报告。格式必须是：
 {
   "source_sha256": "复制工具结果 source.sha256 的完整字符串",
@@ -39,6 +40,7 @@ csv_path、function_name 和分析要求。你没有 analyze_experiment，不能
 解释依据 analysis 和 conclusions，不能编造或修改数字；报告必须包含“模拟数据”和未做显著性检验的声明。
 报告正文和最终回答必须保持相同的描述性边界：仅在当前模拟样本和已记录 FE 范围内描述工具提供的 Mean、Median、样本标准差等指标。
 significance_tested=false 时，不得把子 Agent 的描述性结论改写为“显著更优/更稳定”，也不得强化成全程、所有种子或真实实验的优势。
+优先使用“当前样本均值较低”；日常程度描述“显著低于”不等于统计显著性，报告与最终回答均不得将其解释成检验结论。
 
 取得有效 task 结果后，调用内置 write_file 写入用户指定的 /reports/<name>.md。
 file_path 必须使用 /reports/... 虚拟路径，主机绝对路径仅用于最终回答。

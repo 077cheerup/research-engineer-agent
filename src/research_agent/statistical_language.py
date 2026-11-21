@@ -14,7 +14,11 @@ _NEGATION = re.compile(r"不能|不可|不应|不得|无法|不足以|不等于|
 _OBSERVED = re.compile(r"当前|本次|样本|已观测|已记录|记录的|采样点")
 
 _SIGNIFICANCE = re.compile(
-    r"显著(?:性地|地)?(?:更(?:加)?(?:优|好|稳定|低|高)|优于|低于|高于)"
+    r"显著(?:性地|地)?(?:更(?:加)?(?:优|好|稳定|高)|优于|高于)"
+    # Bare '显著低于/更低' can describe magnitude in everyday language.
+    # An explicit statistical qualifier still makes it an unsupported claim.
+    r"|统计(?:学)?(?:意义上|意义|上).{0,8}显著(?:地)?(?:低于|更(?:加)?低)"
+    r"|统计(?:学)?显著(?:地)?(?:低于|更(?:加)?低)"
     r"|(?:存在|具有|达到|获得)(?:统计(?:学)?(?:意义上|上)?的?)?显著(?:性)?(?:差异|优势)"
     r"|差异(?:具有|达到)统计(?:学)?意义"
 )
