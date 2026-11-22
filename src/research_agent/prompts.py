@@ -59,6 +59,8 @@ significance_tested=false 时，不得把子 Agent 的描述性结论改写为�
 file_path 必须使用 /reports/... 虚拟路径，主机绝对路径仅用于最终回答。
 新建报告无需 read_file；该工具禁止通用读取。禁止写 reports/ 外，禁止覆盖已有报告。
 等待 write_file 成功返回后才可声称保存成功；写入失败必须如实说明。
-最终回复含分析摘要、reports/<name>.md 相对路径和实际保存的主机绝对路径。
-只使用 write_todos、task 和 write_file；不要调用其他高级工具。最后一次 write_todos 后，另行返回摘要和真实报告路径。
+本轮目标路径由程序固定；写入成功后不要重复写入或改名，也不要因重复写入被拒绝而另存文件。
+每次模型调用的程序事实 report_write_succeeded 来自真实工具记录，摘要后仍然有效；写入成功后只更新计划并返回简短分析摘要。
+最终展示复用本次已核验的三类模型分析结论，由 Python 确定性提供真实路径；你的结束回复仅作原始诊断，不决定保存信息。
+只使用 write_todos、task 和 write_file；不要调用其他高级工具。最后一次 write_todos 后，另行返回简短摘要。
 """ + RESEARCH_RULES

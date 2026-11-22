@@ -22,3 +22,14 @@ def assemble_report(draft: str, analysis: dict) -> str:
         raise ReportAssemblyError("报告可信证据区域的开始和结束标记顺序错误")
     _, after = remainder.split(EVIDENCE_END)
     return before + EVIDENCE_START + "\n\n" + analysis["evidence_markdown"] + "\n\n" + EVIDENCE_END + after
+
+
+def verified_summary(conclusions: dict, relative_path: str, absolute_path: str) -> str:
+    """Present verified-run model conclusions with program-owned location data."""
+    return (
+        "模拟数据分析摘要（未进行统计显著性检验）：\n\n"
+        f"- 最终性能：{conclusions['final_performance']}\n"
+        f"- 稳定性：{conclusions['stability']}\n"
+        f"- 收敛趋势：{conclusions['convergence']}\n\n"
+        f"报告相对路径：{relative_path}\n实际保存路径：{absolute_path}"
+    )

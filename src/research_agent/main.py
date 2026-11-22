@@ -18,7 +18,7 @@ from research_agent.agent import ConfigurationError, build_agent, report_path
 from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
 from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, history_summary
-from research_agent.report import ReportAssemblyError
+from research_agent.report import ReportAssemblyError, verified_summary
 from research_agent.summarization import HistoryArchiveBackend, HistoryArchiveError
 
 
@@ -102,9 +102,8 @@ def verify_run(
     if not isinstance(final, AIMessage) or final.tool_calls or not final.text.strip():
         raise AgentRunError("缺少 Agent 最终回答")
     relative = destination.relative_to(root).as_posix()
-    if relative not in final.text or str(destination) not in final.text:
-        raise AgentRunError("Agent 最终回答未包含实际报告路径")
-    return {"summary": final.text, "report_path": str(destination), "analysis": evidence,
+    return {"summary": verified_summary(report_payload["conclusions"], relative, str(destination)),
+            "model_summary": final.text, "report_path": str(destination), "analysis": evidence,
             "conclusions": report_payload["conclusions"], "skill": report_payload["skill"]}
 
 
@@ -149,8 +148,8 @@ def run_agent(
         "description 中须包含以上两个精确参数。取得完整可信分析结果后再写入 "
         f"/{destination.relative_to(workspace).as_posix()}。write_file.file_path 必须精确使用 "
         f"{json.dumps('/' + destination.relative_to(workspace).as_posix())}，无需先读取目标。"
-        f"实际主机绝对路径为 {destination}，此主机路径仅用于最终回答，禁止作为工具的 file_path 参数。"
-        "请在最终回答包含以上相对路径和绝对路径，并给出摘要。"
+        f"实际主机绝对路径为 {destination}，仅供程序在验收后展示，禁止作为工具的 file_path 参数。"
+        "最终回复只需给出简短摘要；实际保存路径由 Python 在验收后提供，不要另选文件名。"
     )
     seen = set()
     call_names = {}

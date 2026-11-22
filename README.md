@@ -39,7 +39,7 @@ uv run python -m research_agent.main \
   --trace
 ```
 
-默认输出已存在时明确失败；更换 `--output reports/F1_comparison_2.md` 后再运行。输出仅允许 `reports/<文件名>.md`，文件名使用字母、数字、`_`、`-`、`.`，不允许嵌套目录。工具虚拟路径为 `/reports/...`，实际文件保存在项目的 `reports/`。最终回答要求同时包含项目相对路径和主机绝对路径。
+默认输出已存在时明确失败；更换 `--output reports/F1_comparison_2.md` 后再启动新运行。输出仅允许 `reports/<文件名>.md`，文件名使用字母、数字、`_`、`-`、`.`，不允许嵌套目录。工具虚拟路径为 `/reports/...`，实际文件保存在项目的 `reports/`。本次运行固定使用 `--output`，模型不能自行改名；最终展示中的项目相对路径和主机绝对路径由 Python 在文件验收后提供。
 
 CLI 默认 `--max-steps 24`，Main 与每次子图运行分别使用这一上限（LangGraph 图步数，不是 token 数或整个嵌套执行的总预算），防止各自无限 Tool Calling。缺失配置、服务错误、漏调工具、文件不存在、数值证据不一致时退出码为 1；只有验收通过才输出“已核验报告”。如果失败前已经生成文件，该文件是**未通过验收的产物**，不会被自动删除或标为成功；再次运行需换文件名。
 
@@ -127,9 +127,9 @@ CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Mem
 ```python
 run_evidence = RunEvidence()  # run_agent 每次运行创建，并绑定期望 CSV / Function
 analyst = make_analyst(workspace, analyst_model, run_evidence, max_steps=24)
-backend = ReportFilesystemBackend(workspace)  # virtual_mode=True
+backend = ReportFilesystemBackend(workspace, output=relative_output)  # virtual_mode=True，锁定目标
 # CLI 指定本轮目标，使提前结束时可在同一图内提醒一次。
-completion = ReportCompletionMiddleware(run_evidence, relative_output)
+completion = ReportCompletionMiddleware(run_evidence, relative_output, workspace)
 agent = create_deep_agent(
     model=main_model,
     tools=[],  # Main 不注册 analyze_experiment
@@ -230,6 +230,14 @@ uv run python -m research_agent.main \
 
 低阈值仅用于演示；触发值须大于保留值，后者至少为 1。不传消息阈值时沿用框架默认设置，短任务可能不会摘要。`--summary-keep-messages` 只在显式指定消息触发阈值时生效。Trace 新增 `summarization_applied`，包含 `cutoff_index`、`created_at_index`、虚拟 `history_path` 和实际 `archive_path`；不打印摘要或原始历史全文。自动摘要会增加模型调用；当前验收覆盖文本实验流程，未验证多媒体归档、超大工具结果溢出回退、并发写入或跨进程恢复。独立 Backend 不开放这些额外路径。
 
+### 摘要后的固定目标与写入状态
+
+`ReportCompletionMiddleware.wrap_model_call()` 每次从原始 state 中的实际 task/write_file 结果重建 `analysis_verified`、`report_write_succeeded` 与固定 `report_path`，附到本次模型 System Prompt。它位于官方摘要包装器内部，事实不依赖摘要生成模型，也不以文件是否碰巧存在替代本轮真实成功记录。即使近期上下文已没有 task 或写入 ToolMessage，模型仍能看到本轮程序事实。
+
+本轮指定报告已写入成功后，只向模型提供 `write_todos` 用于完成计划，随后返回简短结束回复。若模型仍发出未提供的写工具调用，会被工具可用性检查或 Backend 拒绝；Backend 也直接锁定 `--output`，不能另存 `_v2.md` 或覆盖原文件。此行为不将重复请求伪装成新一次写入成功，不重试磁盘失败，也不删除已有产物。持续忽略约束的模型仍受正常图步数上限约束。
+
+最终向用户展示的 `summary` 由 Python 复用本次 task 对应的三类子 Agent 自然语言结论，并附上验收后的真实相对/绝对路径。Main 继续组织 Markdown 报告；它原始结束回复保留为返回值 `model_summary` 和 Trace 中的 `main_reply`，仅用于诊断，不决定保存信息、不写入 Memory。这样不会因模型漏抄路径而丢弃已完成的报告，也不会把模型口头声称的 `_v2.md` 当成实际产物。数值、工具顺序、文件存在与写入内容一致性检查均保留；“模型最后一句必须复制路径”这一检查由确定性展示替代。三类结论仍是模型解释，不是统计显著性的程序证明。
+
 接口参考：[create_deep_agent](https://reference.langchain.com/python/deepagents/graph/create_deep_agent)、[SubAgentMiddleware](https://reference.langchain.com/python/deepagents/middleware/subagents/SubAgentMiddleware)。具体行为以 `uv.lock` 和安装源码为准。
 
 ## experiment-analysis Skill 与渐进加载
@@ -312,7 +320,7 @@ child = create_agent(
 
 `analysis` 保留函数、优化方向、路径/SHA256、每个 seed 最终值、每算法最终统计、平均曲线和完整 `evidence_markdown`。这不是用自然语言摘要替代数据：`task` 结果必须保留完整可信证据，程序将实际统计与子模型结论合并后返回；`verify_analysis()` 会拒绝丢失或篡改任一数据字段的 task 结果。
 
-第二层（`main.py:verify_run()`）：核对 Main 的真实 `task` 目标及调用 ID；`verify_analysis()` 将 task JSON 与该 ID 绑定的记录逐项比较；只有取得可信 task 结果之后的 `write_file` 才有效。再验证磁盘文件、实际写入内容、完整数值证据、模拟数据声明和最终路径。同一批同时调用 task 与 write_file 不能冒充先分析后写入。Main 的消息不包含子图的内部 ToolMessage。
+第二层（`main.py:verify_run()`）：核对 Main 的真实 `task` 目标及调用 ID；`verify_analysis()` 将 task JSON 与该 ID 绑定的记录逐项比较；只有取得可信 task 结果之后、指向固定目标的 `write_file` 才有效。再验证磁盘文件、实际写入内容、完整数值证据与模拟数据声明，并要求 Main 确实结束回答，最后由 Python 组装分析结论和真实路径。同一批同时调用 task 与 write_file 不能冒充先分析后写入。Main 的消息不包含子图的内部 ToolMessage。
 
 Main 的 `write_file.content` 现在是报告草稿，不再要求模型逐字复制来源、64 位 SHA256 或数值表。在草稿合适位置保留一组空的 HTML 标记（不要放进代码块）：
 
@@ -438,6 +446,7 @@ uv run python -m research_agent.main --output reports/F1_phase23_second.md --tra
 - `analysis.py:analyze_csv()`：读取同一份 CSV 字节并计算 SHA256，再调用分析函数。
 - `analysis.py:evidence_markdown()`：只格式化数值证据表，既不解释结论，也不生成完整报告。
 - `report.py:assemble_report()`：用本次可信证据替换草稿中的证据区域，保留 Main 在区域外编写的解释与组织。
+- `report.py:verified_summary()`：验收后展示本次模型分析结论及程序确定的报告路径，不信任模型复制的文件名。
 - `tools/experiment.py:make_analyze_experiment(root)`：以闭包绑定工作区，避免依赖 cwd。
 - `agent.py:load_model()` / `build_agent()`：加载配置、创建模型、Backend 和真实 Agent。
 - `subagent.py:make_analyst()` / `verify_analysis()` / `RunEvidence`：隔离分析子图、核对输出、保存运行级可信证据。
@@ -587,6 +596,8 @@ Main 最小 Planning 增量：实际运行 `UV_CACHE_DIR=/private/tmp/research-a
 
 2026-11-22 Summarization 验证：实际执行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**167 passed in 4.71s**，原 154 项回归保留，新增 13 项用例。自动触发、实际“摘要 + 近期消息”模型输入、原始消息状态、完整原始 task JSON 归档、多次摘要追加、独立 Backend 权限、归档失败拒绝验收均通过。联合 Fake 测试贯通 Planning + Summarization + Memory + Skills + Subagents：task 已不在模型上下文时，仍由真实工具记录生成完整报告并保存 Memory。测试禁止网络，未执行本次远程模型测试，不将 Fake 摘要质量等同于真实模型效果。
 
+2026-11-22 摘要后重复写入/路径偏移修复：实际执行同一离线命令，**174 passed in 4.81s**，原 167 项保留并新增 7 项。模型从实际 System 程序事实读取目标，不依赖 Fake 缓存文件名；验证无历史/有历史时目标及成功状态在压缩后仍可见、成功后只提供计划工具、模型强行重复写入及改名不能生成额外产物、首次写错目标被拒绝、磁盘内容改变仍然失败、CLI 不展示模型虚构路径。最终位置由验收后确定性展示提供；原始 Main 结束回复保留为 model_summary，未被改写为假工具成功。本次未执行远程模型重测。
+
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
 版本依赖未升级：DeepAgents 0.7.40 与 LangChain 1.5.2，原有 Skills/task 兼容点继续由回归测试覆盖。支持源码工作区运行；wheel 不单独打包 skills/data 资源。
@@ -634,6 +645,7 @@ research-engineer-agent/
     ├── test_report.py
     ├── test_planning.py
     ├── test_summarization.py
+    ├── test_run_contract.py
     ├── test_memory.py
     └── memory_worker.py
 ```
