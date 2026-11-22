@@ -1,8 +1,10 @@
-# Mini Research Engineer Agent — Phase 2.3
+# Mini Research Engineer Agent — Phase 2.6
 
 基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 通过 `SkillsMiddleware` 发现专业规范、按需读取白名单 Skill，再调用确定性分析 Tool；验证真实 Skill 加载和工具执行后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
 
-本项目是 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3。基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验和 Skill 专业指导；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
+本项目在 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3 中基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验和 Skill 专业指导；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
+
+当前 Phase 2.6 在以上基础上增量增加 `write_file` 的人工审批实验。使用 `--hitl` 开启终端 approve / edit / reject；不加该参数保留原有非交互流程。审批不开放新的文件权限，也不替代报告与可信证据验收。
 
 在此基础上增量启用 Main 的最小 Planning：官方 `TodoListMiddleware` 提供 `write_todos`，用于当前运行内的任务清单与状态跟踪。实验分析、Analysis Subagent 的 Skill/工具权限、Memory 和报告验收逻辑保持原样。
 
@@ -105,6 +107,7 @@ uv run python scripts/generate_sample.py
              -> 程序核对真实工具记录、证据及参数
              -> task ToolMessage：完整可信 analysis + conclusions + skill 加载凭据
           -> Python 从本次 RunEvidence 组装可信证据区域
+          -> 可选 HITL interrupt -> 人工 approve / edit / reject -> Command(resume=...)
           -> 内置 write_file（组装后的实际参数）-> ReportFilesystemBackend -> reports/*.md
 CLI -> 工具、Skill、数值证据与文件核验 -> 保存可信 Research Memory -> 摘要和真实路径
 ```
@@ -153,7 +156,7 @@ agent = create_deep_agent(
 - 内置 `task` 支持 CompiledSubAgent 的 `structured_response`：返回对象被序列化为一个 task ToolMessage，而非复制子 Agent 全部消息。当前源码还通过 `config.metadata.lc_subagent_tool_call_id` 传递真实父调用 ID，记录器据此绑定证据。
 - `FilesystemBackend.write()` 默认覆盖文件，因此继续使用原来的 `open('x')` 排他新建。`FilesystemMiddleware` 要求保留 `read_file`，Backend 仍拒绝所有通用读取。写入安全策略没有放宽。
 
-Phase 2.3 原先只增加程序管理的 JSON Memory；后续增量增加 Main 的官方 TodoListMiddleware 和 Summarization 验证。没有新增子 Agent、MemoryMiddleware、HITL、MCP 或自定义摘要算法。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
+Phase 2.3 原先只增加程序管理的 JSON Memory；后续增量增加 Main 的官方 TodoListMiddleware、Summarization 验证，以及 Phase 2.6 的可选 write_file HITL。没有新增子 Agent、MemoryMiddleware、MCP 或自定义摘要算法。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
 
 ## Main 的最小 Planning
 
@@ -173,7 +176,7 @@ Phase 2.3 原先只增加程序管理的 JSON Memory；后续增量增加 Main �
 
 每次调用替换完整清单；状态仅支持 `pending`、`in_progress`、`completed`。Main 收到成功 task 结果后完成分析项、开始报告项；实际 write_file 成功后才完成保存项。可在开始写报告的同一轮更新“进行中”状态，但不能预先把保存标成完成。同一轮不并行调用多个 write_todos。失败时保留 pending/in_progress 并在任务内容或最终回答中说明原因，不伪造 completed。
 
-计划保存在当前图的 `todos` 状态中，不写入 Research Memory、不跨进程恢复，也不新增 Checkpointer。Python 的最终验收与 Memory 保存发生在 Main 回答之后，不列为模型已完成的任务。清单是模型的进度记录，**不是可信执行证明**；没有新增 Planning 验收条件或措辞判断，已有任务即使不创建清单也仍按原 `verify_run()` 验收。真实模型是否遵循计划要求须检查 Trace，不能靠最终回答中自称有计划判定。
+计划保存在当前图的 `todos` 状态中，不写入 Research Memory、不跨进程恢复；Planning 自身不依赖 Checkpointer，`--hitl` 的临时检查点另见下节。Python 的最终验收与 Memory 保存发生在 Main 回答之后，不列为模型已完成的任务。清单是模型的进度记录，**不是可信执行证明**；没有新增 Planning 验收条件或措辞判断，已有任务即使不创建清单也仍按原 `verify_run()` 验收。真实模型是否遵循计划要求须检查 Trace，不能靠最终回答中自称有计划判定。
 
 ```bash
 uv run python -m research_agent.main \
@@ -237,6 +240,61 @@ uv run python -m research_agent.main \
 本轮指定报告已写入成功后，只向模型提供 `write_todos` 用于完成计划，随后返回简短结束回复。若模型仍发出未提供的写工具调用，会被工具可用性检查或 Backend 拒绝；Backend 也直接锁定 `--output`，不能另存 `_v2.md` 或覆盖原文件。此行为不将重复请求伪装成新一次写入成功，不重试磁盘失败，也不删除已有产物。持续忽略约束的模型仍受正常图步数上限约束。
 
 最终向用户展示的 `summary` 由 Python 复用本次 task 对应的三类子 Agent 自然语言结论，并附上验收后的真实相对/绝对路径。Main 继续组织 Markdown 报告；它原始结束回复保留为返回值 `model_summary` 和 Trace 中的 `main_reply`，仅用于诊断，不决定保存信息、不写入 Memory。这样不会因模型漏抄路径而丢弃已完成的报告，也不会把模型口头声称的 `_v2.md` 当成实际产物。数值、工具顺序、文件存在与写入内容一致性检查均保留；“模型最后一句必须复制路径”这一检查由确定性展示替代。三类结论仍是模型解释，不是统计显著性的程序证明。
+
+## Phase 2.6：最小 write_file HITL 实验
+
+```bash
+uv run python -m research_agent.main \
+  --output reports/F1_hitl_approve.md --max-steps 60 --trace --hitl
+```
+
+Main 先委派子 Agent 完成真实分析和 Skill 验证，再生成 Markdown 草稿；Python 填入完整可信数值证据后，官方 `HumanInTheLoopMiddleware` 在文件工具执行前发出中断。终端显示 `write_file` 操作、待写路径和报告字符数；输入 `view` 可检查完整待写报告，再输入以下三种决策之一：
+
+| 输入 | 执行结果 |
+| --- | --- |
+| `approve` | 执行已准备的内置 write_file，完成后仍须通过原有报告验收，才保存 Memory |
+| `edit` | 再输入新的 `reports/<安全文件名>.md`；只修改路径，报告内容保持审批时的完整字节 |
+| `reject` | 通过官方 reject 决策恢复图，产生真实拒绝结果后结束本轮，不执行该写入、不保存 Memory；CLI 返回 1 |
+
+空输入不批准；EOF / Ctrl-C 按 reject 处理。终端编辑路径非法或文件已存在时保持暂停并重新询问。一次仅支持一个待审批 write_file，不支持批量写入审批。代码接口可用 `run_agent(hitl=True, reviewer=callback)` 提供受信任 Python 回调；其返回值为 `{"type":"approve"}`、`{"type":"reject"}` 或 `{"type":"edit","file_path":"reports/new.md"}`。这不是模型工具，模型不能自行产生人类决策。
+
+检查了当前锁定版本的真实接口，采用：
+
+```python
+HumanInTheLoopMiddleware(
+    interrupt_on={"write_file": {"allowed_decisions": ["approve", "edit", "reject"]}},
+    edit_notice=None,
+)
+```
+
+HITL 配置只加给 Main，不传给 Analysis Subagent。明确不允许 `respond`，避免用人工文本伪造文件工具成功。该版本 `after_model` 按逆序执行，所以将官方 HITL 放在现有 ReportCompletionMiddleware **之前**，确保中断审批的已是 Python 完成组装的报告。设置 `edit_notice=None` 避免框架把完整报告参数再次塞入工具结果；Trace 单独记录实际编辑路径。
+
+`--hitl` 使用 `InMemorySaver` 和本轮随机 `thread_id`，保存暂停所需的图检查点。随后用**同一图、同一配置、同一个 RunEvidence**恢复，例如 approve 的实际协议是 `Command(resume={"decisions":[{"type":"approve"}]})`。分析工具不会因审批 resume 而重新执行。Checkpointer 仅驻留当前进程，不是 Research Memory，不提供重启终端后恢复审批的功能；不新增数据库或磁盘 Checkpointer。不启用 HITL 时仍不配置 Checkpointer。图步数上限适用于每次 stream/resume 段，不是整个人工会话的总 API 次数预算。
+
+原有固定目标只有一个例外：**人工 edit** 可以授权新的安全路径。共享的运行级 `ReportTarget` 同步更新 Backend、模型程序事实和最终验收目标。`ReportFilesystemBackend` 仍逐次校验 reports/ 路径、拒绝符号链接、用 `open('x')` 新建，审批后也不能覆盖其他进程刚创建的文件。模型不能借此自行改名或越界。
+
+锁定版本刻意保留模型原始 AI 调用参数，人工 edit 的参数通过工具包装层执行。因此程序按实际挂起调用 ID 记录审批后的有效参数，验证时结合真正成功 ToolMessage、磁盘内容和完整数值证据进行核验；不会把原始 AI 消息改成“模型选择了新路径”。批准记录本身不是写入成功凭证。最终输出和 Memory 报告引用使用人工批准后**实际保存并验收通过**的路径。
+
+`--trace` 增加 `hitl_interrupt`（操作、路径、字符数、调用 ID）和 `hitl_decision`（approve/edit/reject 及有效路径）。拒绝后先 resume，让官方图处理拒绝，再停止，不继续询问模型是否重试，也不输出“已核验报告”。
+
+### 三种真实模型手动验收
+
+分别运行三次，使用未存在的文件名：
+
+```bash
+# 输入 approve：应写入并验收，随后保存 Memory
+uv run python -m research_agent.main --hitl --trace --max-steps 60 --output reports/F1_hitl_approve.md
+
+# 输入 reject：应没有本次报告，也没有新增 Memory 报告引用
+uv run python -m research_agent.main --hitl --trace --max-steps 60 --output reports/F1_hitl_reject.md
+
+# 输入 edit，再输入 reports/F1_hitl_human.md：应只创建人工指定的新文件
+uv run python -m research_agent.main --hitl --trace --max-steps 60 --output reports/F1_hitl_edit.md
+```
+
+可额外尝试 edit 为 `../escape.md`、`.env` 或已有报告，确认不能提交；最后输入 reject 结束。正常终端审批内容只能修改路径，不能修改统计证据或工具名称。只读检查产物、原始数据及 Memory；失败产物不会被自动删除。以上会调用真实 API，本次自动测试不执行这些付费命令。
+
+离线测试入口为 `uv run pytest -q tests/test_hitl.py`。测试实际使用官方 Middleware、InMemorySaver、interrupt 和 Command(resume)，仅模型和人工选择为脚本化 Fake；不能将其通过视为真实模型和真人终端集成已通过。
 
 接口参考：[create_deep_agent](https://reference.langchain.com/python/deepagents/graph/create_deep_agent)、[SubAgentMiddleware](https://reference.langchain.com/python/deepagents/middleware/subagents/SubAgentMiddleware)。具体行为以 `uv.lock` 和安装源码为准。
 
@@ -582,9 +640,9 @@ PY
 
 整个 pytest 套件禁止 HTTP 和 socket；跨进程 worker 也显式禁止网络。Fake Model 测试证明持久化、调用协议和数据边界，不证明真实模型一定正确理解历史或专业规范。普通环境运行 `uv run pytest -q`；本机使用可写缓存 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache`。
 
-## Phase 2.3 范围与限制
+## 范围与限制
 
-Phase 2.3 原增量只增加本地 JSON Memory 和 Python 编排；后续输出协议修复给 Analysis Subagent 增加 `submit_analysis` 并确定性组装报告证据。本次 Planning 仅给 Main 增加官方 `write_todos`，不新增子 Agent、Memory 写入 Tool、MemoryMiddleware、Checkpointer、向量数据库、RAG、MCP、HITL 或前端。Skill 白名单、统计公式、报告验证与 Memory 写入机制保持原样。
+Phase 2.3 原增量只增加本地 JSON Memory 和 Python 编排；后续逐步增加可信证据传输、Planning 和 Summarization。Phase 2.6 仅为 Main 的 write_file 增加可选审批和进程内 Checkpointer，不新增子 Agent、Memory 写入 Tool、MemoryMiddleware、向量数据库、RAG、MCP 或前端。Skill 白名单、统计公式、严格报告验收与验收后 Memory 写入继续保留；人工 edit 的有效路径通过运行级记录供验收使用。
 
 2026-11-21 子 Agent 提交协议修复：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**130 passed in 3.83s**。新增/调整用例覆盖真实提交工具执行、提交附带说明文字、提交后直接结束子图、仅文本 JSON/摘要被拒绝、提前提交不能替代分析、缺失结论拒绝、CLI 失败不显示已核验且不保存 Memory。原有 Skill、数值篡改、权限、跨进程 Memory 与措辞不拦截测试继续通过。本次没有调用真实模型，不能将这些离线结果视为远程集成通过；可用 `uv run python scripts/manual_integration.py` 单独验证真实服务。
 
@@ -597,6 +655,8 @@ Main 最小 Planning 增量：实际运行 `UV_CACHE_DIR=/private/tmp/research-a
 2026-11-22 Summarization 验证：实际执行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**167 passed in 4.71s**，原 154 项回归保留，新增 13 项用例。自动触发、实际“摘要 + 近期消息”模型输入、原始消息状态、完整原始 task JSON 归档、多次摘要追加、独立 Backend 权限、归档失败拒绝验收均通过。联合 Fake 测试贯通 Planning + Summarization + Memory + Skills + Subagents：task 已不在模型上下文时，仍由真实工具记录生成完整报告并保存 Memory。测试禁止网络，未执行本次远程模型测试，不将 Fake 摘要质量等同于真实模型效果。
 
 2026-11-22 摘要后重复写入/路径偏移修复：实际执行同一离线命令，**174 passed in 4.81s**，原 167 项保留并新增 7 项。模型从实际 System 程序事实读取目标，不依赖 Fake 缓存文件名；验证无历史/有历史时目标及成功状态在压缩后仍可见、成功后只提供计划工具、模型强行重复写入及改名不能生成额外产物、首次写错目标被拒绝、磁盘内容改变仍然失败、CLI 不展示模型虚构路径。最终位置由验收后确定性展示提供；原始 Main 结束回复保留为 model_summary，未被改写为假工具成功。本次未执行远程模型重测。
+
+2026-11-22 Phase 2.6 HITL：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**191 passed in 5.21s**。原有 174 项回归全部保留，新增 17 项：真实 interrupt 前文件不存在、Command(resume) 批准后写入、人工 edit 后新路径及内容/Memory 一致、reject 经官方恢复后无文件无 Memory、危险/既有/符号链接路径拒绝、批准后创建文件的竞态仍不覆盖、终端 view/空输入、CLI edit/reject，以及 Planning + Summarization + Skills + Subagent + Memory 联合流程。分析失败或提前请求写入不会进入审批。模型和人工输入均为脚本化 Fake，使用的 HITL Middleware、Checkpointer、工具节点、文件操作和 resume 协议是真实实现；没有执行本阶段付费模型与真人终端验收。
 
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
@@ -623,6 +683,7 @@ research-engineer-agent/
 │   ├── memory.py
 │   ├── report.py
 │   ├── summarization.py
+│   ├── hitl.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
@@ -646,6 +707,7 @@ research-engineer-agent/
     ├── test_planning.py
     ├── test_summarization.py
     ├── test_run_contract.py
+    ├── test_hitl.py
     ├── test_memory.py
     └── memory_worker.py
 ```

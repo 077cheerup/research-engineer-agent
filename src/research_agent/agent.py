@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 from typing import NotRequired
+from dataclasses import dataclass, field
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
@@ -15,12 +16,13 @@ from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.subagents import SubAgentMiddleware
 from dotenv import dotenv_values
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain.agents.middleware import AgentMiddleware, AgentState, TodoListMiddleware, hook_config
+from langchain.agents.middleware import AgentMiddleware, AgentState, HumanInTheLoopMiddleware, TodoListMiddleware, hook_config
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 
 from research_agent.prompts import SYSTEM_PROMPT
-from research_agent.report import assemble_report
+from research_agent.report import ReportAssemblyError, assemble_report
 from research_agent.summarization import make_summarization
 from research_agent.tools.experiment import project_root
 from research_agent.subagent import ANALYST_NAME, RunEvidence, make_analyst, verify_analysis
@@ -28,6 +30,19 @@ from research_agent.subagent import ANALYST_NAME, RunEvidence, make_analyst, ver
 
 class ConfigurationError(ValueError):
     """Missing model configuration; values and credentials are never logged."""
+
+
+@dataclass
+class ReportTarget:
+    """Run-local target; only Python's human-review path may retarget it."""
+
+    destination: Path
+    effective_calls: dict = field(default_factory=dict)
+    rejected: bool = False
+    rejected_call_id: str | None = None
+
+    def effective_call(self, call):
+        return self.effective_calls.get(call["id"], call)
 
 
 class ReportState(AgentState):
@@ -43,13 +58,21 @@ class ReportCompletionMiddleware(AgentMiddleware):
 
     state_schema = ReportState
 
-    def __init__(self, evidence: RunEvidence, relative_output: str | None, root: Path | None = None):
+    def __init__(self, evidence: RunEvidence, relative_output: str | None, root: Path | None = None,
+                 target: ReportTarget | None = None, require_analysis_before_review: bool = False):
         self.evidence = evidence
-        self.relative_output = relative_output
+        self._relative_output = relative_output
         self.root = (root or project_root()).resolve()
+        self.target = target
+        self.require_analysis_before_review = require_analysis_before_review
+
+    @property
+    def relative_output(self):
+        return self.target.destination.relative_to(self.root).as_posix() if self.target else self._relative_output
 
     def write_succeeded(self, messages) -> bool:
-        calls = {c["id"]: c for m in messages if isinstance(m, AIMessage) for c in m.tool_calls}
+        calls = {c["id"]: self.target.effective_call(c) if self.target else c
+                 for m in messages if isinstance(m, AIMessage) for c in m.tool_calls}
         return any(
             isinstance(m, ToolMessage) and m.status == "success"
             and calls.get(m.tool_call_id, {}).get("name") == "write_file"
@@ -110,6 +133,8 @@ class ReportCompletionMiddleware(AgentMiddleware):
                 # or tool availability checks, never reported as a fake write.
                 return None
             payload = self.verified_payload(messages[:-1])
+            if payload is None and self.require_analysis_before_review:
+                raise ReportAssemblyError("尚未取得可信分析结果，不能提交人工审批")
             if payload is not None:
                 # Replace the AIMessage by its ID before the real tool node.
                 # The effective submitted arguments therefore remain visible
@@ -164,10 +189,14 @@ class ReportFilesystemBackend(FilesystemBackend):
     No third-party sources are modified.
     """
 
-    def __init__(self, root: Path, output: str | None = None):
+    def __init__(self, root: Path, output: str | None = None, *, target: ReportTarget | None = None):
         self.workspace = root.resolve()
-        self.destination = report_path(output, self.workspace) if output is not None else None
+        self.target = target or (ReportTarget(report_path(output, self.workspace)) if output is not None else None)
         super().__init__(root_dir=self.workspace, virtual_mode=True)
+
+    @property
+    def destination(self):
+        return self.target.destination if self.target else None
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         # The CSV tool owns reads. This also covers dotfiles: the framework's
@@ -176,6 +205,8 @@ class ReportFilesystemBackend(FilesystemBackend):
 
     def write(self, file_path: str, content: str) -> WriteResult:
         try:
+            if self.target and self.target.rejected:
+                return WriteResult(error="人工已拒绝本轮报告写入")
             destination = report_path(file_path, self.workspace)
             if self.destination is not None and destination != self.destination:
                 return WriteResult(error="本次输出路径固定为 /" + self.destination.relative_to(self.workspace).as_posix()
@@ -219,10 +250,14 @@ def build_agent(
     report_output: str | None = None,
     summary_model: BaseChatModel | None = None,
     summary_trigger_messages: int | None = None, summary_keep_messages: int = 6,
+    hitl: bool = False, report_target: ReportTarget | None = None,
 ):
     """Use the real create_deep_agent; injectable models enable offline tests."""
     workspace = Path(root).resolve() if root is not None else project_root()
-    backend = ReportFilesystemBackend(workspace, output=report_output)
+    target = report_target or (ReportTarget(report_path(report_output, workspace)) if report_output is not None else None)
+    if hitl and target is None:
+        raise ValueError("HITL 必须指定本轮 report_output")
+    backend = ReportFilesystemBackend(workspace, output=report_output, target=target)
     main_model = model if model is not None else load_model(workspace)
     run_evidence = evidence if evidence is not None else RunEvidence()
     analyst = make_analyst(
@@ -240,7 +275,12 @@ def build_agent(
         # agent from the final task tool without a global profile registration.
         middleware=[make_summarization(workspace, main_model, summary_model=summary_model,
                                        trigger_messages=summary_trigger_messages, keep_messages=summary_keep_messages),
-                    TodoListMiddleware(), ReportCompletionMiddleware(run_evidence, relative_output, workspace), SubAgentMiddleware(
+                    TodoListMiddleware(), *([HumanInTheLoopMiddleware(
+                        interrupt_on={"write_file": {"allowed_decisions": ["approve", "edit", "reject"]}},
+                        edit_notice=None,
+                    )] if hitl else []),
+                    ReportCompletionMiddleware(run_evidence, relative_output, workspace, target,
+                                               require_analysis_before_review=hitl), SubAgentMiddleware(
             backend=backend, subagents=[analyst],
             task_description="委派实验分析任务。description 中必须包含 csv_path 和 function_name。只可使用以下子 Agent：\n{available_agents}\n返回经过程序核验的完整统计 JSON 和中文结论。",
         ), FilesystemMiddleware(
@@ -252,4 +292,5 @@ def build_agent(
             },
         )],
         name="mini-research-engineer",
+        checkpointer=InMemorySaver() if hitl else None,
     )

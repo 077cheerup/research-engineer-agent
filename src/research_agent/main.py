@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from uuid import uuid4
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,7 +15,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from research_agent.agent import ConfigurationError, build_agent, report_path
+from research_agent.agent import ConfigurationError, ReportTarget, build_agent, report_path
+from research_agent.hitl import ApprovalError, stream_with_approval
 from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
 from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, history_summary
@@ -47,6 +49,7 @@ def verify_report_evidence(saved: str, analysis: dict) -> None:
 def verify_run(
     messages: list, *, root: Path, csv: Path, function: str, destination: Path,
     run_evidence: RunEvidence,
+    report_target: ReportTarget | None = None,
 ) -> dict[str, Any]:
     """Require real ToolMessages, correct ordering, evidence, and disk content.
 
@@ -61,6 +64,8 @@ def verify_run(
     for message in messages:
         if isinstance(message, AIMessage):
             for call in message.tool_calls:
+                if report_target is not None:
+                    call = report_target.effective_call(call)
                 calls[call["id"]] = (call, payload)
         if isinstance(message, ToolMessage) and message.name == "write_file" and message.status == "error":
             last_write_error = message.text
@@ -115,11 +120,13 @@ def run_agent(
     memory_limit: int = 3, memory_max_chars: int = 4000,
     summary_model: BaseChatModel | None = None,
     summary_trigger_messages: int | None = None, summary_keep_messages: int = 6,
+    hitl: bool = False, reviewer: Callable[[dict], dict] | None = None,
 ) -> dict[str, Any]:
     """Invoke a bounded real graph; no deterministic substitute for the agent."""
     workspace = Path(root).resolve() if root is not None else project_root()
     csv = resolve_csv_path(csv_path, workspace)
     destination = report_path(output, workspace)
+    target = ReportTarget(destination)
     if destination.exists():
         raise AgentRunError("目标报告已存在，拒绝覆盖；请通过 --output 指定新文件名")
     if max_steps < 1:
@@ -140,7 +147,7 @@ def run_agent(
     graph = build_agent(workspace, model=model, analyst_model=analyst_model, evidence=run_evidence,
                         max_steps=max_steps, report_output=destination.relative_to(workspace).as_posix(),
                         summary_model=summary_model, summary_trigger_messages=summary_trigger_messages,
-                        summary_keep_messages=summary_keep_messages)
+                        summary_keep_messages=summary_keep_messages, hitl=hitl, report_target=target)
     request = (
         f"分析算法 A 和算法 B 在 CEC2013 {function} 上的模拟实验结果，比较最终性能、稳定性和收敛趋势，"
         f"生成中文 Markdown 报告。CSV 参数：{json.dumps(csv.relative_to(workspace).as_posix())}；"
@@ -161,10 +168,13 @@ def run_agent(
     if historical_text:
         inputs.append({"role": "user", "content": historical_text})
     inputs.append({"role": "user", "content": request})
+    config = {"recursion_limit": max_steps}
+    if hitl:
+        config["configurable"] = {"thread_id": uuid4().hex}
     try:
-        for state in graph.stream(
-            {"messages": inputs},
-            config={"recursion_limit": max_steps}, stream_mode="values",
+        for state in stream_with_approval(
+            graph, {"messages": inputs}, config, root=workspace, target=target,
+            enabled=hitl, reviewer=reviewer, trace=trace,
         ):
             messages = state["messages"]
             event = state.get(SUMMARIZATION_EVENT_KEY)
@@ -233,8 +243,11 @@ def run_agent(
         raise AgentRunError(f"报告可信证据组装失败：{exc}；未确认保存，未写入 Memory") from exc
     except HistoryArchiveError as exc:
         raise AgentRunError(f"历史归档失败：{exc}") from exc
+    except ApprovalError as exc:
+        raise AgentRunError(f"人工审批未完成执行：{exc}") from exc
     try:
-        verified = verify_run(messages, root=workspace, csv=csv, function=function, destination=destination, run_evidence=run_evidence)
+        verified = verify_run(messages, root=workspace, csv=csv, function=function, destination=target.destination,
+                              run_evidence=run_evidence, report_target=target)
     except AnalysisVerificationError as exc:
         raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
     try:
@@ -247,11 +260,12 @@ def run_agent(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.3")
+    parser = argparse.ArgumentParser(description="Mini Research Engineer Agent — Phase 2.6 HITL")
     parser.add_argument("--csv", default="data/sample_experiments.csv")
     parser.add_argument("--function", default="F1")
     parser.add_argument("--output", default="reports/F1_comparison.md")
     parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument("--hitl", action="store_true", help="在 write_file 前暂停，终端人工 approve / edit / reject")
     parser.add_argument("--summary-trigger-messages", type=int, help="验证用摘要消息阈值；默认使用框架模型感知阈值")
     parser.add_argument("--summary-keep-messages", type=int, default=6, help="指定消息阈值时保留的近期消息数，默认 6")
     parser.add_argument("--trace", action="store_true", help="显示工具、计划、摘要归档及统计事件，不输出模型配置或密钥")
@@ -261,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             csv_path=args.csv, function=args.function, output=args.output,
             max_steps=args.max_steps, trace=print if args.trace else None,
             summary_trigger_messages=args.summary_trigger_messages, summary_keep_messages=args.summary_keep_messages,
+            hitl=args.hitl,
         )
     except (ConfigurationError, AgentRunError, ValueError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
