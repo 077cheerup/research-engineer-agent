@@ -20,6 +20,7 @@ from langchain_openai import ChatOpenAI
 
 from research_agent.prompts import SYSTEM_PROMPT
 from research_agent.report import assemble_report
+from research_agent.summarization import make_summarization
 from research_agent.tools.experiment import project_root
 from research_agent.subagent import ANALYST_NAME, RunEvidence, make_analyst, verify_analysis
 
@@ -171,6 +172,8 @@ def build_agent(
     analyst_model: BaseChatModel | None = None, evidence: RunEvidence | None = None,
     max_steps: int = 24,
     report_output: str | None = None,
+    summary_model: BaseChatModel | None = None,
+    summary_trigger_messages: int | None = None, summary_keep_messages: int = 6,
 ):
     """Use the real create_deep_agent; injectable models enable offline tests."""
     workspace = Path(root).resolve() if root is not None else project_root()
@@ -190,7 +193,9 @@ def build_agent(
         system_prompt=SYSTEM_PROMPT,
         # Public same-name replacement removes the default general-purpose
         # agent from the final task tool without a global profile registration.
-        middleware=[TodoListMiddleware(), ReportCompletionMiddleware(run_evidence, relative_output), SubAgentMiddleware(
+        middleware=[make_summarization(workspace, main_model, summary_model=summary_model,
+                                       trigger_messages=summary_trigger_messages, keep_messages=summary_keep_messages),
+                    TodoListMiddleware(), ReportCompletionMiddleware(run_evidence, relative_output), SubAgentMiddleware(
             backend=backend, subagents=[analyst],
             task_description="委派实验分析任务。description 中必须包含 csv_path 和 function_name。只可使用以下子 Agent：\n{available_agents}\n返回经过程序核验的完整统计 JSON 和中文结论。",
         ), FilesystemMiddleware(

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
@@ -18,6 +19,7 @@ from research_agent.tools.experiment import project_root, resolve_csv_path
 from research_agent.subagent import ANALYST_NAME, AnalysisVerificationError, RunEvidence, normalize_evidence, verify_analysis
 from research_agent.memory import ResearchMemoryError, ResearchMemoryStore, history_summary
 from research_agent.report import ReportAssemblyError
+from research_agent.summarization import HistoryArchiveBackend, HistoryArchiveError
 
 
 class AgentRunError(RuntimeError):
@@ -112,6 +114,8 @@ def run_agent(
     model: BaseChatModel | None = None, analyst_model: BaseChatModel | None = None, max_steps: int = 24,
     trace: Callable[[str], None] | None = None,
     memory_limit: int = 3, memory_max_chars: int = 4000,
+    summary_model: BaseChatModel | None = None,
+    summary_trigger_messages: int | None = None, summary_keep_messages: int = 6,
 ) -> dict[str, Any]:
     """Invoke a bounded real graph; no deterministic substitute for the agent."""
     workspace = Path(root).resolve() if root is not None else project_root()
@@ -135,7 +139,9 @@ def run_agent(
         trace(f"memory_retrieved matched={len(historical)} injected_chars={len(historical_text)}")
     run_evidence = RunEvidence(csv_path=csv.relative_to(workspace).as_posix(), function_name=function)
     graph = build_agent(workspace, model=model, analyst_model=analyst_model, evidence=run_evidence,
-                        max_steps=max_steps, report_output=destination.relative_to(workspace).as_posix())
+                        max_steps=max_steps, report_output=destination.relative_to(workspace).as_posix(),
+                        summary_model=summary_model, summary_trigger_messages=summary_trigger_messages,
+                        summary_keep_messages=summary_keep_messages)
     request = (
         f"分析算法 A 和算法 B 在 CEC2013 {function} 上的模拟实验结果，比较最终性能、稳定性和收敛趋势，"
         f"生成中文 Markdown 报告。CSV 参数：{json.dumps(csv.relative_to(workspace).as_posix())}；"
@@ -151,6 +157,7 @@ def run_agent(
     plan_created = False
     messages = []
     reminder_seen = False
+    last_summary = None
     inputs = []
     if historical_text:
         inputs.append({"role": "user", "content": historical_text})
@@ -161,6 +168,18 @@ def run_agent(
             config={"recursion_limit": max_steps}, stream_mode="values",
         ):
             messages = state["messages"]
+            event = state.get(SUMMARIZATION_EVENT_KEY)
+            if event:
+                if event.get("file_path") is None:
+                    raise HistoryArchiveError("摘要已触发，但原始历史归档失败；本次运行不能验收或保存 Memory")
+                signature = (event["cutoff_index"], event.get("created_at_index"), event["file_path"])
+                if trace and signature != last_summary:
+                    trace("summarization_applied " + json.dumps({
+                        "cutoff_index": event["cutoff_index"], "created_at_index": event.get("created_at_index"),
+                        "history_path": event["file_path"],
+                        "archive_path": str(HistoryArchiveBackend(workspace).archive_path(event["file_path"])),
+                    }, ensure_ascii=False))
+                last_summary = signature
             if trace:
                 if state.get("report_reminder_sent") and not reminder_seen:
                     trace("report_completion_reminder attempt=1")
@@ -213,6 +232,8 @@ def run_agent(
         raise AgentRunError(f"子 Agent 分析验证失败：{exc}") from exc
     except ReportAssemblyError as exc:
         raise AgentRunError(f"报告可信证据组装失败：{exc}；未确认保存，未写入 Memory") from exc
+    except HistoryArchiveError as exc:
+        raise AgentRunError(f"历史归档失败：{exc}") from exc
     try:
         verified = verify_run(messages, root=workspace, csv=csv, function=function, destination=destination, run_evidence=run_evidence)
     except AnalysisVerificationError as exc:
@@ -232,12 +253,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--function", default="F1")
     parser.add_argument("--output", default="reports/F1_comparison.md")
     parser.add_argument("--max-steps", type=int, default=24)
-    parser.add_argument("--trace", action="store_true", help="显示工具调用、计划创建/更新及统计结果，不输出模型配置或密钥")
+    parser.add_argument("--summary-trigger-messages", type=int, help="验证用摘要消息阈值；默认使用框架模型感知阈值")
+    parser.add_argument("--summary-keep-messages", type=int, default=6, help="指定消息阈值时保留的近期消息数，默认 6")
+    parser.add_argument("--trace", action="store_true", help="显示工具、计划、摘要归档及统计事件，不输出模型配置或密钥")
     args = parser.parse_args(argv)
     try:
         result = run_agent(
             csv_path=args.csv, function=args.function, output=args.output,
             max_steps=args.max_steps, trace=print if args.trace else None,
+            summary_trigger_messages=args.summary_trigger_messages, summary_keep_messages=args.summary_keep_messages,
         )
     except (ConfigurationError, AgentRunError, ValueError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)

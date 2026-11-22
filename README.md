@@ -6,6 +6,8 @@
 
 在此基础上增量启用 Main 的最小 Planning：官方 `TodoListMiddleware` 提供 `write_todos`，用于当前运行内的任务清单与状态跟踪。实验分析、Analysis Subagent 的 Skill/工具权限、Memory 和报告验收逻辑保持原样。
 
+Summarization 验证使用同一锁定版本的官方 Middleware，并将历史归档绑定到独立受限 Backend。自动摘要只改变模型本次看到的上下文，原始消息与可信实验记录继续保留；没有修改第三方框架源码。
+
 ## 安装、配置与运行
 
 需要 Python 3.11+ 和 uv。依赖和具体版本固定在 `uv.lock`；`.python-version` 指定 3.11。
@@ -92,6 +94,7 @@ uv run python scripts/generate_sample.py
 ```text
 用户 -> Python 按函数/算法检索并验证 Memory -> 有长度限制的历史事实参考
       -> Main（create_deep_agent）
+          -> 每次模型调用：官方 Summarization -> 摘要 + 近期消息（原始 state.messages 保留）
           -> write_todos：创建清单，并根据实际工具结果更新状态
           -> task(subagent_type="experiment-analyst", description="CSV + Function")
              -> 隔离的 Analysis Subagent（create_agent）
@@ -133,6 +136,7 @@ agent = create_deep_agent(
     backend=backend,
     system_prompt=SYSTEM_PROMPT,
     middleware=[
+        make_summarization(workspace, main_model),  # 内部独立 HistoryArchiveBackend
         TodoListMiddleware(),
         completion,
         SubAgentMiddleware(backend=backend, subagents=[analyst]),
@@ -149,7 +153,7 @@ agent = create_deep_agent(
 - 内置 `task` 支持 CompiledSubAgent 的 `structured_response`：返回对象被序列化为一个 task ToolMessage，而非复制子 Agent 全部消息。当前源码还通过 `config.metadata.lc_subagent_tool_call_id` 传递真实父调用 ID，记录器据此绑定证据。
 - `FilesystemBackend.write()` 默认覆盖文件，因此继续使用原来的 `open('x')` 排他新建。`FilesystemMiddleware` 要求保留 `read_file`，Backend 仍拒绝所有通用读取。写入安全策略没有放宽。
 
-Phase 2.3 原先只增加程序管理的 JSON Memory；本次后续增量增加 Main 的官方 TodoListMiddleware。没有新增子 Agent、MemoryMiddleware、HITL、MCP 或自定义 Summarization。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
+Phase 2.3 原先只增加程序管理的 JSON Memory；后续增量增加 Main 的官方 TodoListMiddleware 和 Summarization 验证。没有新增子 Agent、MemoryMiddleware、HITL、MCP 或自定义摘要算法。`virtual_mode` 是路径限制，不是操作系统沙箱；这是本地可信演示。
 
 ## Main 的最小 Planning
 
@@ -190,6 +194,41 @@ plan_updated {"tool_call_id":"...","todos":[...completed...]}
 ```
 
 `plan_created` / `plan_updated` 只在实际 write_todos 成功 ToolMessage 后产生，内容取自工具更新后的真实 `state.todos`；不会解析模型自述或打印整段模型配置。失败调用显示 `tool_error write_todos`，不算创建/更新成功。完成清单后 Main 仍须另行返回分析摘要与实际报告路径，随后由原程序核验文件及证据并保存 Memory。
+
+## 自动 Summarization 验证
+
+已阅读锁定的 DeepAgents 0.7.40 安装源码。它的官方 `SummarizationMiddleware` 通过 `wrap_model_call` 生成有效模型输入，并在私有 `_summarization_event` 中记录边界；**不会用摘要删除原始 `state.messages`**。这与直接使用 LangChain 中会替换消息状态的同名 Middleware 行为不同。本项目沿用 DeepAgents 的版本，在 `build_agent()` 中按同名替换默认实例，避免重复摘要；没有添加手动 compact 工具，也没有修改框架源码。
+
+`src/research_agent/summarization.py` 的 `make_summarization()` 默认调用官方工厂，保留模型感知的触发、近期消息保留与参数截断默认值。为了可重复验证，可以显式指定按消息数触发与保留，此时使用官方构造器，不设置额外参数截断或摘要输入裁剪。模型输入会是 System Prompt、带 `lc_source=summarization` 标记的摘要消息，以及原始近期消息。框架会适当调整边界以保留完整工具调用/结果对，所以保留条数可能多于配置值。摘要模型默认复用 Main 模型；测试通过 `summary_model` 注入 Fake Model，不需要额外环境变量。
+
+归档与报告权限完全分开：
+
+- 内部 `HistoryArchiveBackend` 只接受 `/conversation_history/session_<32位小写hex>.md`，物理位置为项目的 `.research_history/conversation_history/`。只允许新建和校验旧内容后的追加，禁止覆盖、重写、路径穿越或符号链接；不提供通用 `read()`。内部 `download_files()` 仅用于官方 Middleware 读取已有同一会话归档后追加。
+- 该 Backend **不绑定 FilesystemMiddleware，不暴露给 Main 工具**。Main 的 `read_file` 仍全部拒绝，`write_file` 仍只能新建 `reports/*.md`；不能访问 `.env`、CSV 或归档。摘要中的虚拟历史路径仅供程序与人工核验，不能据此获得读取权限。
+- 官方会在多次摘要时向同一会话文件追加被压缩的原始文本历史，不重复归档上次摘要。`.research_history/` 已加入 `.gitignore`。归档供人工检查，不是 Checkpointer 或完整状态恢复格式，不承诺保留所有消息元数据；原始结构化消息在本次运行 state 中保持不变。
+
+可信证据不取自有损摘要。`RunEvidence` 仍保存真实子 Agent 执行结果；`ReportCompletionMiddleware` 和 `verify_run()` 读取原始消息与可信记录，因此即使 task JSON 已从模型上下文中移除，Python 仍能填入完整来源、SHA256 与统计证据。Research Memory 继续只在完整验收后写入，不以摘要替代事实。Planning 的 todos 状态和子 Agent 的 Skill 权限不变。
+
+官方在归档失败时会警告并继续摘要。本项目 CLI 在观测到失败事件时明确报错并终止，不接受报告或保存 Memory。底层图单独使用者应检查该事件；不能将 `file_path=None` 当作成功归档。原有失败产物仍不自动覆盖或删除。
+
+离线验证：
+
+```bash
+uv run pytest -q tests/test_summarization.py
+uv run pytest -q
+```
+
+测试捕获**实际传给模型的消息**，而非仅检查最终回答中是否包含“摘要”：低阈值自动触发；低于阈值不触发；摘要标记与近期消息原文匹配；原始消息 ID/内容/工具对保持完整；多次摘要追加同一归档。联合用例同时启用 Planning、Memory 检索、Subagent 与 Skill，刻意用不含统计的 Fake 摘要移走模型上下文中的 task JSON，仍生成并核验完整报告、保存可信 Memory。另验证原始完整 task JSON 进入归档，及路径权限和归档失败不会误报成功。Fake 测试证明执行机制与数据边界，**不证明真实模型生成摘要的质量**。
+
+真实服务手动验证（会调用 API；请选未存在的报告名称）：
+
+```bash
+uv run python -m research_agent.main \
+  --output reports/F1_summarization.md --max-steps 60 --trace \
+  --summary-trigger-messages 7 --summary-keep-messages 2
+```
+
+低阈值仅用于演示；触发值须大于保留值，后者至少为 1。不传消息阈值时沿用框架默认设置，短任务可能不会摘要。`--summary-keep-messages` 只在显式指定消息触发阈值时生效。Trace 新增 `summarization_applied`，包含 `cutoff_index`、`created_at_index`、虚拟 `history_path` 和实际 `archive_path`；不打印摘要或原始历史全文。自动摘要会增加模型调用；当前验收覆盖文本实验流程，未验证多媒体归档、超大工具结果溢出回退、并发写入或跨进程恢复。独立 Backend 不开放这些额外路径。
 
 接口参考：[create_deep_agent](https://reference.langchain.com/python/deepagents/graph/create_deep_agent)、[SubAgentMiddleware](https://reference.langchain.com/python/deepagents/middleware/subagents/SubAgentMiddleware)。具体行为以 `uv.lock` 和安装源码为准。
 
@@ -546,6 +585,8 @@ Phase 2.3 原增量只增加本地 JSON Memory 和 Python 编排；后续输出�
 
 Main 最小 Planning 增量：实际运行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**154 passed in 4.82s**。保留原 148 项测试，新增 6 项离线用例：无历史/有历史时真实计划创建和更新、官方工具实际更新图中 todos、报告写入失败时保持未完成且不写 Memory、清单全 completed 不能替代真实分析/报告、非法状态不会产生成功计划事件。测试驱动真实 DeepAgents 图和官方 Todo 工具，但模型是 Fake，没有调用付费 API，也没有执行本次 Planning 的远程模型验收。
 
+2026-11-22 Summarization 验证：实际执行 `UV_CACHE_DIR=/private/tmp/research-agent-uv-cache uv run pytest -q`，**167 passed in 4.71s**，原 154 项回归保留，新增 13 项用例。自动触发、实际“摘要 + 近期消息”模型输入、原始消息状态、完整原始 task JSON 归档、多次摘要追加、独立 Backend 权限、归档失败拒绝验收均通过。联合 Fake 测试贯通 Planning + Summarization + Memory + Skills + Subagents：task 已不在模型上下文时，仍由真实工具记录生成完整报告并保存 Memory。测试禁止网络，未执行本次远程模型测试，不将 Fake 摘要质量等同于真实模型效果。
+
 仅支持本地单写者、顺序多进程运行；原始 CSV 与报告需保留。SHA256 完整性校验不等于密码学认证；自由文本解释没有程序语义判定，需人工审阅。真实模型如何使用相关历史仍需手动验证。
 
 版本依赖未升级：DeepAgents 0.7.40 与 LangChain 1.5.2，原有 Skills/task 兼容点继续由回归测试覆盖。支持源码工作区运行；wheel 不单独打包 skills/data 资源。
@@ -570,6 +611,7 @@ research-engineer-agent/
 │   ├── skill_backend.py
 │   ├── memory.py
 │   ├── report.py
+│   ├── summarization.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
@@ -591,6 +633,7 @@ research-engineer-agent/
     ├── test_report_completion.py
     ├── test_report.py
     ├── test_planning.py
+    ├── test_summarization.py
     ├── test_memory.py
     └── memory_worker.py
 ```
