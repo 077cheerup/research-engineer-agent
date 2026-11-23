@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -121,6 +122,7 @@ def run_agent(
     summary_model: BaseChatModel | None = None,
     summary_trigger_messages: int | None = None, summary_keep_messages: int = 6,
     hitl: bool = False, reviewer: Callable[[dict], dict] | None = None,
+    callbacks: list[BaseCallbackHandler] | None = None,
 ) -> dict[str, Any]:
     """Invoke a bounded real graph; no deterministic substitute for the agent."""
     workspace = Path(root).resolve() if root is not None else project_root()
@@ -169,6 +171,8 @@ def run_agent(
         inputs.append({"role": "user", "content": historical_text})
     inputs.append({"role": "user", "content": request})
     config = {"recursion_limit": max_steps}
+    if callbacks is not None:
+        config["callbacks"] = callbacks
     if hitl:
         config["configurable"] = {"thread_id": uuid4().hex}
     try:

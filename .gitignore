@@ -12,4 +12,5 @@ reports/*
 !reports/.gitkeep
 memory/
 .research_history/
+evaluation_runs/
 

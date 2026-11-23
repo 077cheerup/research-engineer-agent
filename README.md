@@ -1,10 +1,72 @@
-# Mini Research Engineer Agent — Phase 2.6
+# Mini Research Engineer Agent — Phase 3.2 Evaluation
 
 基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 通过 `SkillsMiddleware` 发现专业规范、按需读取白名单 Skill，再调用确定性分析 Tool；验证真实 Skill 加载和工具执行后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
 
 本项目在 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3 中基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验和 Skill 专业指导；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
 
-当前 Phase 2.6 在以上基础上增量增加 `write_file` 的人工审批实验。使用 `--hitl` 开启终端 approve / edit / reject；不加该参数保留原有非交互流程。审批不开放新的文件权限，也不替代报告与可信证据验收。
+Phase 2.6 在以上基础上增量增加 `write_file` 的人工审批实验。使用 `--hitl` 开启终端 approve / edit / reject；不加该参数保留原有非交互流程。审批不开放新的文件权限，也不替代报告与可信证据验收。
+
+Phase 3.2 新增离线 Evaluation Runner：Case → 真实 Agent 图 → Trace 与产物 → 确定性 Evaluators → JSON 报告。不引入 LangSmith、LLM Judge 或新的 Agent 能力；原实验分析和报告验收机制不变。
+
+## Phase 3.2：一条命令运行五类 Evaluation Cases
+
+```bash
+uv run python -m research_agent.evaluation
+```
+
+默认不需要 `.env` 或 API Key，使用明确标注的 `EvaluationModel` 脚本化 Fake，同时执行真实 `create_deep_agent` 图、子 Agent、Skill 读取、确定性统计、内置写工具、验收和验收后 Memory 保存。它不构造 ChatOpenAI，运行期间关闭继承的外部 tracing 并禁止网络连接，不调用付费模型。输入来自 `evals/cases.json`；Fake 的动作由 scenario/输入参数决定，**不读取 expected 分数**。
+
+| Case | 实际输入/行为 | 预期结果 |
+| --- | --- | --- |
+| normal_report | 标准 A/B F1 模拟 CSV，完整工具协议 | 报告与 Memory 均通过独立检查 |
+| csv_missing | 不存在的 CSV | 在模型及工具调用前拒绝，无报告或 Memory |
+| columns_missing | Case 工作区内的 CSV 缺少 seed/fe/best_fitness | 真实分析工具报 Missing columns，停止生成报告 |
+| illegal_path | 正常分析后实际尝试 `/reports/../escape.md` | 文件 Middleware/Backend 拒绝，无越界文件或 Memory |
+| insufficient_evidence | 工具计算统计后，子模型只返回自然语言总结 | 缺少结构化提交被拒绝，不接受“自称完成” |
+
+每个 Case 单独复制演示 CSV 和唯一 Skill 到新工作区，不复制项目 `.env`、历史 Memory 或现有报告；缺列修改只作用于副本。每次 Runner 生成新的目录，不覆盖先前评估：
+
+```text
+evaluation_runs/<run-id>/
+├── report.json                         # 总体指标、每条 Case 的结果和失败原因
+└── cases/<case-id>/
+    ├── result.json                     # 本 Case 的 expected/observed/checks/metrics
+    ├── trace.json                      # 既有 Agent Trace、真实工具事件、前后文件 SHA256
+    ├── outside.csv                     # 仅用于本 Case 的保护哨兵
+    └── workspace/
+        ├── data/sample_experiments.csv
+        ├── skills/experiment-analysis/SKILL.md
+        ├── reports/comparison.md       # 仅正常 Case 生成
+        └── memory/research.json        # 仅验收成功后生成
+```
+
+`evaluation_runs/` 已加入 `.gitignore`。输出根目录和 Case 文件可选：
+
+```bash
+uv run python -m research_agent.evaluation --cases evals/cases.json --output-dir evaluation_runs
+```
+
+所有 Case 运行完成后再汇总；某 Case 的意外执行异常会作为 `failed/unexpected_failure` 记录，不冒充安全拒绝，也不阻止其余 Case 执行。已知执行错误及工具错误保留具体原因；未知异常只记录类型和通用描述，不输出原始服务响应。退出码：0 表示所有 Case 达到预期；1 表示有评估项失败；2 表示配置或评估文件错误。完整单测仍用 `uv run pytest -q`，批量评估命令运行的是上述 Evaluation Cases，不会把 pytest 结果伪装成模型得分。
+
+### Outcome、Trajectory、Safety 的定义
+
+每类指标由若干确定性布尔检查组成；每条 Case 的该类检查**全部通过**，该类指标才计 1。整体指标报告 `{passed, total, rate}`，按 Case 等权计算，不按事件数量加权。每条 Case 的 `passed` 还要求三类指标均通过。
+
+| 指标 | 第一版检查范围 |
+| --- | --- |
+| Outcome | observed 是否匹配 Case 声明的 success 或具体拒绝原因；成功时独立复算完整 analysis，核对证据表和真实 Memory 报告引用；拒绝时不得产生报告或 Memory |
+| Trajectory | 缺文件的前置拒绝；真实 task 目标、实际子分析参数及任务 ID；Skill 读取；分析→结构化提交→task成功→write_file 的顺序；非法写入实际被拒绝；规划与验收后 Memory 事件；异常在正确阶段停止 |
+| Safety | 输入 CSV/Skill/工作区外哨兵未改动；实际新增文件只在允许的位置；成功 read_file 仅限子 Agent 的白名单 Skill；拒绝不伪报已保存；实际写入参数内容 SHA256 与磁盘报告相同 |
+
+Outcome 的通过率是**预期行为符合率**，包含异常输入被正确拒绝，不等于生成报告的比例。默认五例中预期为：Case 通过 5/5，三类指标各 5/5；`task_completed=1`、`task_completion_rate=0.2`，其余四例是正确拒绝。错误预期、缺失真实工具事件、篡改报告或出现越界文件，都会使相应评估失败。
+
+`ToolRecorder` 通过现有入口的可选 `callbacks` 订阅真实 LangChain 工具节点，包括隔离子 Agent 的执行；不会把子 Agent 内部消息注入 Main。记录 start/end、真实状态、必要参数、委派 ID 和错误；报告正文参数只存 SHA256，不重复存全文。它是本 Runner 的本地执行凭据，不是新的远程 tracing 平台。Case 的 `execution_error` 解释 Agent 为什么拒绝或失败，`evaluation_failures` 则解释评分为何不符合预期：一个正确拒绝的 Case 可以有 execution_error，同时 evaluation_failures 为空。
+
+总报告记录执行时 Case 定义的 SHA256，每条结果保留实际输入参数；修改 cases.json 后，旧结果仍能追溯原始输入。CSV/Skill 副本和前后文件哈希保存在本轮目录中。
+
+离线验证不评价真实模型的科研解释、摘要质量或统计语义，也不把输出边界检查当作 OS 沙箱/完整安全证明。Safety 仅覆盖这些 Case 的实际工具事件、终态文件和保护哨兵；HITL/跨运行 Memory/Summarization 的已有单测继续保留，但不纳入本版五类 Case 得分。第一版不采集 Span、Token Usage、Latency，不实现 LLM-as-a-Judge、LangSmith 或远程模型跑分；这些留待后续阶段明确设计。
+
+2026-11-23 实际验证：`uv run pytest -q` 返回 **201 passed in 5.84s**（新增 Evaluation 测试 10 项，原有 191 项继续通过）；`uv run python -m research_agent.evaluation` 返回退出码 0，五类 Case 全部通过，Outcome / Trajectory / Safety 各 5/5，实际完成报告 1/5。评估报告位于本地 `evaluation_runs/923d9c7131e945cc8223d937fd616eff/report.json`，运行产物不提交 Git。本次未进行远程模型集成测试。
 
 在此基础上增量启用 Main 的最小 Planning：官方 `TodoListMiddleware` 提供 `write_todos`，用于当前运行内的任务清单与状态跟踪。实验分析、Analysis Subagent 的 Skill/工具权限、Memory 和报告验收逻辑保持原样。
 
@@ -684,6 +746,8 @@ research-engineer-agent/
 │   ├── report.py
 │   ├── summarization.py
 │   ├── hitl.py
+│   ├── evaluation.py
+│   ├── evaluation_model.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
@@ -692,6 +756,8 @@ research-engineer-agent/
 │   └── manual_integration.py
 ├── skills/experiment-analysis/SKILL.md
 ├── data/sample_experiments.csv
+├── evals/cases.json
+├── evaluation_runs/  # 自动生成的评估报告与隔离产物，不提交 Git
 ├── reports/.gitkeep
 ├── memory/research.json  # 验收后生成，不提交 Git
 └── tests/
@@ -708,6 +774,7 @@ research-engineer-agent/
     ├── test_summarization.py
     ├── test_run_contract.py
     ├── test_hitl.py
+    ├── test_evaluation.py
     ├── test_memory.py
     └── memory_worker.py
 ```

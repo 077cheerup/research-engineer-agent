@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "normal_report",
+      "scenario": "normal",
+      "csv_path": "data/sample_experiments.csv",
+      "expected": {"outcome": "success", "failure_code": null}
+    },
+    {
+      "id": "csv_missing",
+      "scenario": "missing_csv",
+      "csv_path": "data/missing.csv",
+      "expected": {"outcome": "rejected", "failure_code": "csv_missing"}
+    },
+    {
+      "id": "columns_missing",
+      "scenario": "missing_columns",
+      "csv_path": "data/sample_experiments.csv",
+      "expected": {"outcome": "rejected", "failure_code": "columns_missing"}
+    },
+    {
+      "id": "illegal_path",
+      "scenario": "illegal_path",
+      "csv_path": "data/sample_experiments.csv",
+      "write_path": "/reports/../escape.md",
+      "expected": {"outcome": "rejected", "failure_code": "illegal_path"}
+    },
+    {
+      "id": "insufficient_evidence",
+      "scenario": "insufficient_evidence",
+      "csv_path": "data/sample_experiments.csv",
+      "expected": {"outcome": "rejected", "failure_code": "insufficient_evidence"}
+    }
+  ]
+}
