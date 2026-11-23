@@ -1,4 +1,4 @@
-# Mini Research Engineer Agent — Phase 3.2 Evaluation
+# Mini Research Engineer Agent — Phase 3.3 Local Observability
 
 基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 通过 `SkillsMiddleware` 发现专业规范、按需读取白名单 Skill，再调用确定性分析 Tool；验证真实 Skill 加载和工具执行后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
 
@@ -7,6 +7,8 @@
 Phase 2.6 在以上基础上增量增加 `write_file` 的人工审批实验。使用 `--hitl` 开启终端 approve / edit / reject；不加该参数保留原有非交互流程。审批不开放新的文件权限，也不替代报告与可信证据验收。
 
 Phase 3.2 新增离线 Evaluation Runner：Case → 真实 Agent 图 → Trace 与产物 → 确定性 Evaluators → JSON 报告。不引入 LangSmith、LLM Judge 或新的 Agent 能力；原实验分析和报告验收机制不变。
+
+Phase 3.3 在同一 Runner 上增加本地模型/工具 Span、耗时、模型输入规模和返回的 Token Usage。只增加可观测数据，不改变 Case 评分、实验分析、Skill、Memory、报告验收或第三方源码。
 
 ## Phase 3.2：一条命令运行五类 Evaluation Cases
 
@@ -64,9 +66,54 @@ Outcome 的通过率是**预期行为符合率**，包含异常输入被正确�
 
 总报告记录执行时 Case 定义的 SHA256，每条结果保留实际输入参数；修改 cases.json 后，旧结果仍能追溯原始输入。CSV/Skill 副本和前后文件哈希保存在本轮目录中。
 
-离线验证不评价真实模型的科研解释、摘要质量或统计语义，也不把输出边界检查当作 OS 沙箱/完整安全证明。Safety 仅覆盖这些 Case 的实际工具事件、终态文件和保护哨兵；HITL/跨运行 Memory/Summarization 的已有单测继续保留，但不纳入本版五类 Case 得分。第一版不采集 Span、Token Usage、Latency，不实现 LLM-as-a-Judge、LangSmith 或远程模型跑分；这些留待后续阶段明确设计。
+离线验证不评价真实模型的科研解释、摘要质量或统计语义，也不把输出边界检查当作 OS 沙箱/完整安全证明。Safety 仅覆盖这些 Case 的实际工具事件、终态文件和保护哨兵；HITL/跨运行 Memory/Summarization 的已有单测继续保留，但不纳入本版五类 Case 得分。Phase 3.2 初版没有性能记录；后续 Phase 3.3 增量见下文，仍不实现 LLM-as-a-Judge、LangSmith 或远程模型跑分。
 
 2026-11-23 实际验证：`uv run pytest -q` 返回 **201 passed in 5.84s**（新增 Evaluation 测试 10 项，原有 191 项继续通过）；`uv run python -m research_agent.evaluation` 返回退出码 0，五类 Case 全部通过，Outcome / Trajectory / Safety 各 5/5，实际完成报告 1/5。评估报告位于本地 `evaluation_runs/923d9c7131e945cc8223d937fd616eff/report.json`，运行产物不提交 Git。本次未进行远程模型集成测试。
+
+## Phase 3.3：本地 Span、耗时与 Token Usage
+
+仍用同一条命令：
+
+```bash
+uv run python -m research_agent.evaluation
+```
+
+终端在每条 Case 后显示 `performance: ... ms; model_calls=...; tool_calls=...; token_usage=...`，最后输出整轮 JSON 性能摘要。产物沿用原目录：
+
+- `cases/<id>/trace.json` 增加 `spans`，记录 run/model/tool 的 ID、父 Span ID、名称、起始偏移毫秒、耗时与 success/error/incomplete 状态。真实回调 run_id 可与既有 tool_events 关联。
+- `cases/<id>/result.json` 的 `performance` 是该次 `run_agent()` 的性能摘要，计时包含构建、前置校验、图执行、报告验收和 Memory 保存，不含 Case 副本准备、独立评分及评估 JSON 写入。
+- 总 `report.json` 的 `performance` 汇总模型/工具调用数、错误数、未完成 Span 数、Token Usage、按模型/工具分组的耗时与最慢五个 Span。整轮 `duration_ms` 从 `run_suite()` 开始计时，包含输入准备、所有 Case、评分和分 Case JSON 写入，不含模块导入或最后总报告落盘。耗时随机器和负载变化，不设置易波动的速度评分阈值。
+
+`PerformanceRecorder` 使用 LangChain 现有回调和单调时钟 `perf_counter()`，每个 Case 独立实例。它只记录模型和工具 Span；图节点回调只保留父子 ID 关系，用于把子 Agent 模型与工具关联到父 `task`，不记录大量内部图 Span。根 Span 标记实际运行是否抛错；预期拒绝仍可能有 error Span，这与 Evaluation 的 Case PASS 不矛盾。没有收到结束回调的 Span 在运行结束时标为 `incomplete`，不会伪装为成功。
+
+耗时为**包含子调用的耗时**：`task` 包含子 Agent 内的模型和工具调用，`inclusive_total_ms` 也可能重叠，不能把这些数字相加当作墙钟总耗时。模型分组优先使用标准回调元数据 `ls_model_name`，缺少时使用模型类名。每次模型 Span 另记录 `input_messages` 和 `input_text_chars`，汇总各模型的最大输入规模；字符数只统计消息文本，不含工具 schema、图片或完整请求编码，**不等于 Token 数**。这些数值可帮助定位慢工具、调用次数过多和上下文增长，但不能仅凭 Fake 的本地耗时判断远程 API 瓶颈。
+
+Token 只来自返回结果：优先读取 `AIMessage.usage_metadata` 的 `input_tokens/output_tokens/total_tokens`；缺失时兼容 `LLMResult.llm_output.token_usage` 的 `prompt_tokens/completion_tokens/total_tokens`。两种来源同时存在时不重复相加，多个候选回答也不算额外请求。没有完整有效 usage 的调用保持未知，不用字符数估算，也不把未知写成 0。
+
+```json
+{
+  "token_usage": {
+    "status": "unavailable",
+    "calls_with_usage": 0,
+    "calls_without_usage": 28,
+    "input_tokens": null,
+    "output_tokens": null,
+    "total_tokens": null
+  }
+}
+```
+
+上例是默认 Fake 的实际使用情况。状态分为 `not_called`（未调用模型）、`unavailable`（全部未提供 usage）、`partial`（只有部分调用提供，合计仅覆盖已报告部分）、`complete`（所有调用均提供）。错误调用没有 usage 时同样计入缺失覆盖，不能声称汇总包含所有计费 Token。本版不计算价格、缓存 Token 细目、首 Token 延迟或流式分片指标。
+
+性能回调不保存模型输入/输出全文、工具参数/返回体、API Key 或原始异常体，只记录白名单名称、数值、ID、异常类型；既有执行 Trace 与可信实验分析证据继续按原逻辑保留。Runner 全程离线；默认 Fake 不产生真实 Token Usage。针对 Token 正常化及汇总的测试使用明确的合成 usage，**不是远程计费记录**。记录器也可通过现有 `run_agent(callbacks=[recorder])` 接口用于手动运行，结束后调用 `recorder.finish(error)` 获取 Span 和摘要；本阶段没有自动调用真实 API。
+
+针对性测试命令：
+
+```bash
+uv run pytest -q tests/test_observability.py tests/test_evaluation.py
+```
+
+2026-11-23 Phase 3.3 实际验证：针对性测试 **22 passed in 1.32s**，完整回归 **213 passed in 6.40s**（新增 12 项，原有 201 项全部保留）。新增覆盖单调时钟精确计时、嵌套 Span、文本规模、异常/中断收尾、错误 ToolMessage/Command、usage 来源与去重、未知/部分/零用量，以及真实图回调与 JSON/CLI 汇总。批量命令退出码 0，Case 与三类质量指标继续各 5/5；本次 Runner 用时 112.633 ms，记录 28 次模型和 24 次工具调用、0 个未完成 Span，Token Usage 为 unavailable。报告为 `evaluation_runs/3524d0e6e9974672bbbeb9cecdfffb13/report.json`。这些是离线 Fake 的本地观测，不是远程延迟或真实计费结果。
 
 在此基础上增量启用 Main 的最小 Planning：官方 `TodoListMiddleware` 提供 `write_todos`，用于当前运行内的任务清单与状态跟踪。实验分析、Analysis Subagent 的 Skill/工具权限、Memory 和报告验收逻辑保持原样。
 
@@ -748,6 +795,7 @@ research-engineer-agent/
 │   ├── hitl.py
 │   ├── evaluation.py
 │   ├── evaluation_model.py
+│   ├── observability.py
 │   └── tools/
 │       ├── __init__.py
 │       └── experiment.py
@@ -775,6 +823,7 @@ research-engineer-agent/
     ├── test_run_contract.py
     ├── test_hitl.py
     ├── test_evaluation.py
+    ├── test_observability.py
     ├── test_memory.py
     └── memory_worker.py
 ```

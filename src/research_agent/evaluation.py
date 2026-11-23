@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+from time import perf_counter
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from research_agent.analysis import AnalysisError
 from research_agent.evaluation_model import EvaluationModel
 from research_agent.main import AgentRunError, run_agent, verify_report_evidence
 from research_agent.memory import ResearchMemoryStore
+from research_agent.observability import PerformanceRecorder, performance_summary
 from research_agent.skill_backend import SKILL_PATH
 from research_agent.tools.experiment import make_analyze_experiment, project_root
 
@@ -207,14 +209,16 @@ def run_case(case, case_dir: Path, source: Path):
         (root / "data/sample_experiments.csv").write_text("algorithm,function\nA,F1\n", encoding="utf-8")
     before = file_snapshot(case_dir)
     recorder, trace = ToolRecorder(), []
+    performance = PerformanceRecorder(case["id"])
     result, error = None, None
     try:
         result = run_agent(root=root, csv_path=case["csv_path"], function="F1", output="reports/comparison.md",
                            model=EvaluationModel(csv_input=case["csv_path"], scenario=case["scenario"],
                                                  requested_write_path=case.get("write_path")),
-                           callbacks=[recorder], trace=trace.append, max_steps=40)
+                           callbacks=[recorder, performance], trace=trace.append, max_steps=40)
     except Exception as exc:
         error = exc
+    spans, timing = performance.finish(error)
     after = file_snapshot(case_dir)
     score = evaluate_case(case, root=root, result=result, error=error, trace=trace, tools=recorder.events, before=before, after=after)
     error_info = None if error is None else {"type": type(error).__name__,
@@ -223,15 +227,17 @@ def run_case(case, case_dir: Path, source: Path):
     record = {"id": case["id"], "scenario": case["scenario"], "mode": "offline_fake", "expected": case["expected"],
               "input": {"csv_path": case["csv_path"], "function_name": "F1", "output": "reports/comparison.md",
                         "requested_write_path": case.get("write_path")},
-              **score, "execution_error": error_info, "artifacts": {"workspace": "workspace", "trace": "trace.json",
+              **score, "execution_error": error_info, "performance": timing,
+              "artifacts": {"workspace": "workspace", "trace": "trace.json",
               "files": sorted(path.removeprefix("workspace/") for path in set(after) - set(before) if path.startswith("workspace/"))}}
-    (case_dir / "trace.json").write_text(json.dumps({"agent_trace": trace, "tool_events": recorder.events,
+    (case_dir / "trace.json").write_text(json.dumps({"agent_trace": trace, "tool_events": recorder.events, "spans": spans,
         "before_files": before, "after_files": after}, ensure_ascii=False, indent=2), encoding="utf-8")
     (case_dir / "result.json").write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     return record
 
 
 def run_suite(*, cases_path: Path | None = None, output_dir: Path | None = None, source: Path | None = None):
+    started = perf_counter()
     source = (source or project_root()).resolve()
     cases_path = (cases_path or source / "evals/cases.json").resolve()
     cases = load_cases(cases_path)
@@ -245,6 +251,8 @@ def run_suite(*, cases_path: Path | None = None, output_dir: Path | None = None,
         records = [run_case(case, run_dir / "cases" / case["id"], source) for case in cases]
     metrics = {name: {"passed": sum(r["metrics"][name] for r in records), "total": len(records),
                       "rate": sum(r["metrics"][name] for r in records) / len(records)} for name in ("outcome", "trajectory", "safety")}
+    spans = [s for record in records for s in json.loads(
+        (run_dir / "cases" / record["id"] / "trace.json").read_text(encoding="utf-8"))["spans"]]
     report = {"schema_version": 1, "mode": "offline_fake", "cases_file": str(cases_path),
         "case_definitions_sha256": hashlib.sha256(json.dumps(cases, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
         "versions": {name: version(name) for name in ("deepagents", "langchain")},
@@ -253,6 +261,7 @@ def run_suite(*, cases_path: Path | None = None, output_dir: Path | None = None,
                     "task_completed": sum(r["observed"]["outcome"] == "success" for r in records),
                     "task_completion_rate": sum(r["observed"]["outcome"] == "success" for r in records) / len(records),
                     "metrics": metrics},
+        "performance": performance_summary(spans, duration_ms=(perf_counter() - started) * 1000),
         "cases": [{**r, "artifacts": {**r["artifacts"], "case_directory": f"cases/{r['id']}"}} for r in records]}
     report_path = run_dir / "report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
@@ -260,7 +269,7 @@ def run_suite(*, cases_path: Path | None = None, output_dir: Path | None = None,
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Phase 3.2: offline deterministic Evaluation Runner")
+    parser = argparse.ArgumentParser(description="Phase 3.3: offline Evaluation Runner with local performance spans")
     parser.add_argument("--cases", type=Path, help="默认 evals/cases.json")
     parser.add_argument("--output-dir", type=Path, help="默认 evaluation_runs，每次生成独立目录")
     args = parser.parse_args(argv)
@@ -271,7 +280,11 @@ def main(argv=None):
         return 2
     for case in report["cases"]:
         print(f"{'PASS' if case['passed'] else 'FAIL'} {case['id']}: {case['observed']['outcome']} / {case['observed']['failure_code']}")
+        perf = case["performance"]
+        print(f"  performance: {perf['duration_ms']:.3f} ms; model_calls={perf['model_calls']}; "
+              f"tool_calls={perf['tool_calls']}; token_usage={perf['token_usage']['status']}")
     print(json.dumps(report["summary"], ensure_ascii=False))
+    print("性能摘要：" + json.dumps(report["performance"], ensure_ascii=False))
     print(f"评估报告：{path}")
     return 0 if report["summary"]["passed_cases"] == report["summary"]["total_cases"] else 1
 
