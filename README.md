@@ -1,5 +1,9 @@
 # Mini Research Engineer Agent — Phase 3.3 Local Observability
 
+**项目状态：已完成（2026-11-23）。** 本学习项目以 Phase 3.3 为收尾范围，保留为 Agent Harness 学习与回归测试参考；GitHub 仓库保持可写，未设置 Archived。
+
+收尾代码基线为 `2cf30dd`：完整离线测试 **213 passed**，五类 Evaluation Cases 全部符合预期，Outcome / Trajectory / Safety 各 **5/5**。Phase 3.3 使用 Fake Model 验证真实图、工具及观测记录，未进行该阶段的远程模型延迟或真实 Token 计费验证；更早阶段的远程验证记录见下文。
+
 基于 **DeepAgents 0.7.40** 的增量科研分析闭环：Main 用内置 `task` 委派 `experiment-analyst`，子 Agent 通过 `SkillsMiddleware` 发现专业规范、按需读取白名单 Skill，再调用确定性分析 Tool；验证真实 Skill 加载和工具执行后返回完整统计与解释，Main 用内置 `write_file` 保存报告。Main 仍由 `create_deep_agent()` 创建，子图通过官方 `CompiledSubAgent` 接口接入。
 
 本项目在 DeepAgents / Agent Harness 学习路线 Level 7 Phase 2.3 中基于 Phase 2.2 及统计语言修复 `a2817cb` 增量增加本地 JSON Research Memory，保留可信证据直接传输、分章节核验和 Skill 专业指导；统计公式与 CSV 格式不变。这里研究的内容只有算法 A/B 的模拟结果；不运行真实 CEC2013 函数，不代表正式 CEC2013 实验，不做显著性检验。
